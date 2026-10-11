@@ -146,3 +146,14 @@ describe("tracker: cards shown after the hand", () => {
     expect(test.counts.bluffShare).toEqual([1, 2]);
   });
 });
+
+describe("tracker: positions at bigger tables", () => {
+  it("labels a 6-handed table from the dealer button", () => {
+    const t = new Tracker();
+    const names = ["A", "B", "C", "D", "E", "F"];
+    t.handle({ dir: "in", event: "room:lobby_stats_updated", args: [{ playerStates: names.map((n, i) => ({ id: i + 1, name: n, posType: `s${i + 1}`, stack: 500, playState: "playing" })) }] });
+    t.handle({ dir: "in", event: "game:stage_began", args: [{ stageType: "set_blinds" }] });
+    t.handle({ dir: "in", event: "game:dealer_updated", args: [{ dealerSeatPos: "s4", smallBlindSeatPos: "s5", bigBlindSeatPos: "s6" }] });
+    expect(Object.fromEntries(t.state.players.map((p) => [p.name, p.position]))).toEqual({ A: "UTG", B: "MP", C: "CO", D: "BTN", E: "SB", F: "BB" });
+  });
+});

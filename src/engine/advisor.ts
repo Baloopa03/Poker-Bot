@@ -105,7 +105,7 @@ export function advise(s: TableState, learned: OpponentModel, opts: AdvisorOptio
   const headsUp = dealt === 2;
   const profiles = villains.map((v) => model.profile(v.key, v.name, dealt));
   const ranges = villains.map((v, i) =>
-    estimateRange({ key: v.key, profile: profiles[i], position: v.position, headsUp, actions: s.actions, board: s.board, dead: heroCards }),
+    estimateRange({ key: v.key, profile: profiles[i], position: v.position, headsUp, players: dealt, actions: s.actions, board: s.board, dead: heroCards }),
   );
   // Never let a read wipe a range out entirely.
   ranges.forEach((r, i) => {
@@ -221,10 +221,7 @@ function callEV(ctx: Ctx, eqAll: number): number {
     return { i, callAmt, ...respondToBet(ctx.ranges[i], s.board, ctx.profiles[i], ratio, Math.min(0.9, base)) };
   });
   let ev = 0;
-  for (let mask = 0; mask < 1 << resp.length; mask++) {
-    let prob = 1;
-    for (let k = 0; k < resp.length; k++) prob *= mask & (1 << k) ? 1 - resp[k].fold : resp[k].fold;
-    if (prob < 1e-4) continue;
+  for (const { mask, prob } of continueScenarios(resp.map((r) => 1 - r.fold))) {
     const ranges = villains.map((_, i) => {
       const k = resp.findIndex((r) => r.i === i);
       if (k < 0) return ctx.ranges[i];
@@ -348,15 +345,11 @@ function aggressiveEV(ctx: Ctx, to: number): AggResult {
   });
 
   // Enumerate which villains continue (independence assumption).
-  const n = villains.length;
   let ev = 0;
   let allFold = 1;
   let eqCalledSum = 0;
   let eqCalledW = 0;
-  for (let mask = 0; mask < 1 << n; mask++) {
-    let prob = 1;
-    for (let i = 0; i < n; i++) prob *= mask & (1 << i) ? 1 - resp[i].fold : resp[i].fold;
-    if (prob < 1e-4) continue;
+  for (const { mask, prob } of continueScenarios(resp.map((r) => 1 - r.fold))) {
     if (mask === 0) {
       allFold = prob;
       ev += prob * s.pot;
@@ -371,7 +364,8 @@ function aggressiveEV(ctx: Ctx, to: number): AggResult {
     const finalPot = s.pot + heroAdded + callerAdds;
     const heroAllIn = heroAdded >= hero.stack;
     const everyoneAllIn = heroAllIn || callers.every((i) => villains[i].committedStreet + villains[i].stack <= heroTo);
-    const R = realization(ctx, everyoneAllIn);
+    // Each extra caller makes it harder to realise equity.
+    const R = realization(ctx, everyoneAllIn) * (1 - 0.04 * (callers.length - 1));
 
     let scenarioEV: number;
     if (callers.length === 1 && resp[callers[0]].canAct && !everyoneAllIn) {
@@ -406,6 +400,47 @@ function aggressiveEV(ctx: Ctx, to: number): AggResult {
     ev += prob * scenarioEV;
   }
   return { ev, foldProb: allFold, eqCalled: eqCalledW > 0 ? eqCalledSum / eqCalledW : 0 };
+}
+
+/**
+ * Which villains continue, as bitmasks with probabilities (independent players).
+ * Exact for up to 4 villains; at bigger tables, every case with at most two
+ * callers is exact and the rest is lumped into one "three or more call" case.
+ */
+export function continueScenarios(cont: number[]): Array<{ mask: number; prob: number }> {
+  const n = cont.length;
+  const probOf = (mask: number) => {
+    let p = 1;
+    for (let i = 0; i < n; i++) p *= mask & (1 << i) ? cont[i] : 1 - cont[i];
+    return p;
+  };
+  const out: Array<{ mask: number; prob: number }> = [];
+  if (n <= 4) {
+    for (let mask = 0; mask < 1 << n; mask++) {
+      const prob = probOf(mask);
+      if (prob >= 1e-4) out.push({ mask, prob });
+    }
+    return out;
+  }
+  let covered = 0;
+  const push = (mask: number) => {
+    const prob = probOf(mask);
+    covered += prob;
+    if (prob >= 1e-4) out.push({ mask, prob });
+  };
+  push(0);
+  for (let i = 0; i < n; i++) push(1 << i);
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) push((1 << i) | (1 << j));
+  const rest = 1 - covered;
+  if (rest >= 1e-4) {
+    const order = cont.map((c, i) => [c, i] as const).sort((a, b) => b[0] - a[0]);
+    let mask = 0;
+    order.forEach(([c, i], k) => {
+      if (k < 3 || c >= 0.3) mask |= 1 << i;
+    });
+    out.push({ mask, prob: rest });
+  }
+  return out;
 }
 
 function likelyClasses(range: Range, strengths: Float64Array): string[] {

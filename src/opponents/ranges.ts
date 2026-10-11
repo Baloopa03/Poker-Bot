@@ -56,18 +56,27 @@ function reweight(range: Range, fn: (i: number) => number): void {
 const boardAt = (board: readonly Card[], street: Street) =>
   board.slice(0, street === "flop" ? 3 : street === "turn" ? 4 : street === "river" || street === "showdown" ? 5 : 0);
 
-/** Fraction of hands a player opens from a position, from their overall PFR. */
-function openFraction(profile: Profile, position: Position | undefined, headsUp: boolean): number {
+/**
+ * Fraction of hands a player opens from a position, from their overall
+ * raise-first rate. Later positions open much wider; the multipliers spread a
+ * player's average PFR across seats the way sound ranges do.
+ */
+const OPEN_FACTOR: Record<"3" | "6", Partial<Record<Position, number>>> = {
+  "3": { BTN: 1.3, SB: 1.1, BB: 0.9 },
+  "6": { UTG: 0.7, MP: 0.85, CO: 1.35, BTN: 2.1, SB: 1.6, BB: 0.9 },
+};
+function openFraction(profile: Profile, position: Position | undefined, players: number): number {
   const pfr = profile.stat("pfr");
-  const factor = headsUp ? 1.6 : position === "BTN" ? 1.35 : position === "SB" ? 1.15 : 0.9;
+  if (players <= 2) return Math.min(0.95, pfr * 1.6);
+  const factor = OPEN_FACTOR[players <= 4 ? "3" : "6"][position ?? "BB"] ?? 1;
   return Math.min(0.95, pfr * factor);
 }
 
 /** Continue frequency vs a bet of `ratio` × pot, from a base frequency measured around 2/3 pot. */
 export function sizeAdjustedContinue(base: number, ratio: number): number {
   const mdf = (r: number) => 1 / (1 + r);
-  // Home-game players react to size less than theory says: exponent < 1.
-  return Math.min(0.97, Math.max(0.03, base * Math.pow(mdf(ratio) / mdf(0.66), 0.6)));
+  // Theory scales defence with 1/(1+ratio); real players react a bit less to size.
+  return Math.min(0.97, Math.max(0.03, base * Math.pow(mdf(ratio) / mdf(0.66), 0.85)));
 }
 
 export interface RangeContext {
@@ -75,6 +84,8 @@ export interface RangeContext {
   profile: Profile;
   position?: Position;
   headsUp: boolean;
+  /** Players dealt in this hand. */
+  players?: number;
   actions: readonly HandAction[];
   board: readonly Card[];
   /** Cards the villain cannot hold (hero's cards, board). */
@@ -113,7 +124,7 @@ export function estimateRange(ctx: RangeContext): Range {
           break;
         case "raise":
         case "bet":
-          if (r === 0) reweight(range, (i) => inTop(pre[i], openFraction(profile, ctx.position, ctx.headsUp)));
+          if (r === 0) reweight(range, (i) => inTop(pre[i], openFraction(profile, ctx.position, ctx.players ?? (ctx.headsUp ? 2 : 3))));
           else if (r === 1) reweight(range, (i) => Math.max(inTop(pre[i], Math.max(threeBet, 0.04)), 0.06 * bluff));
           else reweight(range, (i) => Math.max(inTop(pre[i], 0.035), 0.02));
           break;

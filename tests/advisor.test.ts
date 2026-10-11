@@ -259,3 +259,44 @@ describe("people for guest accounts", () => {
     expect(restored.profile("g4").name).toBe("Isaiah");
   });
 });
+
+describe("bigger tables", () => {
+  it("scenario probabilities always sum to 1", async () => {
+    const { continueScenarios } = await import("../src/engine/advisor");
+    for (const n of [1, 3, 4, 6, 9]) {
+      const sc = continueScenarios(Array.from({ length: n }, (_, i) => 0.2 + 0.07 * i));
+      expect(sc.reduce((s, x) => s + x.prob, 0)).toBeCloseTo(1, 3);
+    }
+  });
+
+  const ring = (n: number, hero: string, stacks: number[]) => {
+    const labels: Position[] = n === 6 ? ["UTG", "MP", "CO", "BTN", "SB", "BB"] : ["UTG", "UTG", "MP", "MP", "MP", "CO", "BTN", "SB", "BB"];
+    const players = labels.map((pos, i) =>
+      player(i === 0 ? "me" : `p${i}`, `s${i + 1}`, pos, stacks[i] - (pos === "SB" ? 5 : pos === "BB" ? 10 : 0), pos === "SB" ? 5 : pos === "BB" ? 10 : 0),
+    );
+    const s = table({ hero, players, actions: [] });
+    s.sb = 5;
+    s.bb = 10;
+    s.lastRaiseSize = 10;
+    return s;
+  };
+
+  it("works 6-handed with uneven stacks and stays fast", () => {
+    const s = ring(6, "As Ks", [1000, 250, 800, 120, 2000, 640]);
+    const t0 = performance.now();
+    const a = advise(s, new OpponentModel(), { seed: 11 })!;
+    expect(performance.now() - t0).toBeLessThan(2500);
+    expect(a.best.action).toBe("raise");
+    legal(s, a);
+    expect(advise(ring(6, "7d 2c", [1000, 250, 800, 120, 2000, 640]), new OpponentModel(), { seed: 11 })!.best.action).toBe("fold");
+  });
+
+  it("works 9-handed", () => {
+    const s = ring(9, "Qh Qd", [500, 500, 300, 900, 500, 150, 500, 700, 500]);
+    const t0 = performance.now();
+    const a = advise(s, new OpponentModel(), { seed: 12 })!;
+    expect(performance.now() - t0).toBeLessThan(4000);
+    expect(a.best.action).toBe("raise");
+    legal(s, a);
+  });
+});

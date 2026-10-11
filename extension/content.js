@@ -852,14 +852,19 @@
     for (let i = 0; i < NUM_COMBOS; i++) if (range.w[i] > 0) range.w[i] *= Math.max(0, Math.min(1, fn(i)));
   }
   var boardAt = (board, street) => board.slice(0, street === "flop" ? 3 : street === "turn" ? 4 : street === "river" || street === "showdown" ? 5 : 0);
-  function openFraction(profile, position, headsUp) {
+  var OPEN_FACTOR = {
+    "3": { BTN: 1.3, SB: 1.1, BB: 0.9 },
+    "6": { UTG: 0.7, MP: 0.85, CO: 1.35, BTN: 2.1, SB: 1.6, BB: 0.9 }
+  };
+  function openFraction(profile, position, players) {
     const pfr = profile.stat("pfr");
-    const factor = headsUp ? 1.6 : position === "BTN" ? 1.35 : position === "SB" ? 1.15 : 0.9;
+    if (players <= 2) return Math.min(0.95, pfr * 1.6);
+    const factor = OPEN_FACTOR[players <= 4 ? "3" : "6"][position ?? "BB"] ?? 1;
     return Math.min(0.95, pfr * factor);
   }
   function sizeAdjustedContinue(base, ratio) {
     const mdf = (r) => 1 / (1 + r);
-    return Math.min(0.97, Math.max(0.03, base * Math.pow(mdf(ratio) / mdf(0.66), 0.6)));
+    return Math.min(0.97, Math.max(0.03, base * Math.pow(mdf(ratio) / mdf(0.66), 0.85)));
   }
   function estimateRange(ctx) {
     const { profile, key } = ctx;
@@ -889,7 +894,7 @@
             break;
           case "raise":
           case "bet":
-            if (r === 0) reweight(range, (i) => inTop(pre[i], openFraction(profile, ctx.position, ctx.headsUp)));
+            if (r === 0) reweight(range, (i) => inTop(pre[i], openFraction(profile, ctx.position, ctx.players ?? (ctx.headsUp ? 2 : 3))));
             else if (r === 1) reweight(range, (i) => Math.max(inTop(pre[i], Math.max(threeBet, 0.04)), 0.06 * bluff));
             else reweight(range, (i) => Math.max(inTop(pre[i], 0.035), 0.02));
             break;
@@ -964,7 +969,7 @@
     const headsUp = dealt === 2;
     const profiles = villains.map((v) => model2.profile(v.key, v.name, dealt));
     const ranges = villains.map(
-      (v, i) => estimateRange({ key: v.key, profile: profiles[i], position: v.position, headsUp, actions: s.actions, board: s.board, dead: heroCards })
+      (v, i) => estimateRange({ key: v.key, profile: profiles[i], position: v.position, headsUp, players: dealt, actions: s.actions, board: s.board, dead: heroCards })
     );
     ranges.forEach((r, i) => {
       if (r.size() < 1) ranges[i] = Range.full().removeCards([...heroCards, ...s.board]);
@@ -1064,10 +1069,7 @@
       return { i, callAmt, ...respondToBet(ctx.ranges[i], s.board, ctx.profiles[i], ratio, Math.min(0.9, base)) };
     });
     let ev = 0;
-    for (let mask = 0; mask < 1 << resp.length; mask++) {
-      let prob = 1;
-      for (let k = 0; k < resp.length; k++) prob *= mask & 1 << k ? 1 - resp[k].fold : resp[k].fold;
-      if (prob < 1e-4) continue;
+    for (const { mask, prob } of continueScenarios(resp.map((r) => 1 - r.fold))) {
       const ranges = villains.map((_, i) => {
         const k = resp.findIndex((r) => r.i === i);
         if (k < 0) return ctx.ranges[i];
@@ -1162,15 +1164,11 @@
       const r = respondToBet(ctx.ranges[i], s.board, ctx.profiles[i], ratioFor(v), baseContinue(ctx, i));
       return { ...r, canAct: true };
     });
-    const n = villains.length;
     let ev = 0;
     let allFold = 1;
     let eqCalledSum = 0;
     let eqCalledW = 0;
-    for (let mask = 0; mask < 1 << n; mask++) {
-      let prob = 1;
-      for (let i = 0; i < n; i++) prob *= mask & 1 << i ? 1 - resp[i].fold : resp[i].fold;
-      if (prob < 1e-4) continue;
+    for (const { mask, prob } of continueScenarios(resp.map((r) => 1 - r.fold))) {
       if (mask === 0) {
         allFold = prob;
         ev += prob * s.pot;
@@ -1184,7 +1182,7 @@
       const finalPot = s.pot + heroAdded + callerAdds;
       const heroAllIn = heroAdded >= hero.stack;
       const everyoneAllIn = heroAllIn || callers.every((i) => villains[i].committedStreet + villains[i].stack <= heroTo);
-      const R = realization(ctx, everyoneAllIn);
+      const R = realization(ctx, everyoneAllIn) * (1 - 0.04 * (callers.length - 1));
       let scenarioEV;
       if (callers.length === 1 && resp[callers[0]].canAct && !everyoneAllIn) {
         const i = callers[0];
@@ -1217,6 +1215,41 @@
       ev += prob * scenarioEV;
     }
     return { ev, foldProb: allFold, eqCalled: eqCalledW > 0 ? eqCalledSum / eqCalledW : 0 };
+  }
+  function continueScenarios(cont) {
+    const n = cont.length;
+    const probOf = (mask) => {
+      let p = 1;
+      for (let i = 0; i < n; i++) p *= mask & 1 << i ? cont[i] : 1 - cont[i];
+      return p;
+    };
+    const out = [];
+    if (n <= 4) {
+      for (let mask = 0; mask < 1 << n; mask++) {
+        const prob = probOf(mask);
+        if (prob >= 1e-4) out.push({ mask, prob });
+      }
+      return out;
+    }
+    let covered = 0;
+    const push = (mask) => {
+      const prob = probOf(mask);
+      covered += prob;
+      if (prob >= 1e-4) out.push({ mask, prob });
+    };
+    push(0);
+    for (let i = 0; i < n; i++) push(1 << i);
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) push(1 << i | 1 << j);
+    const rest = 1 - covered;
+    if (rest >= 1e-4) {
+      const order = cont.map((c, i) => [c, i]).sort((a, b) => b[0] - a[0]);
+      let mask = 0;
+      order.forEach(([c, i], k) => {
+        if (k < 3 || c >= 0.3) mask |= 1 << i;
+      });
+      out.push({ mask, prob: rest });
+    }
+    return out;
   }
   function likelyClasses(range, strengths) {
     const agg = /* @__PURE__ */ new Map();
