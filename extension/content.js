@@ -1012,6 +1012,7 @@
     const dealt = s.players.filter((p) => p.inHand).length;
     const headsUp = dealt === 2;
     const profiles = villains.map((v) => model2.profile(v.key, v.name, dealt));
+    const displayName = (i) => profiles[i].name || villains[i].name;
     const ranges = villains.map(
       (v, i) => estimateRange({ key: v.key, profile: profiles[i], position: v.position, headsUp, players: dealt, actions: s.actions, board: s.board, dead: heroCards })
     );
@@ -1042,10 +1043,11 @@
     const options = buildOptions(ctx, eqAll);
     options.sort((a, b) => b.ev - a.ev);
     const best = options[0];
-    const potOdds = ctx.toCall > 0 ? ctx.toCall / (s.pot + ctx.toCall) : 0;
+    const limpSpot = ctx.preflop && ctx.raises === 0;
+    const potOdds = ctx.toCall > 0 && !limpSpot ? ctx.toCall / (s.pot + ctx.toCall) : 0;
     const villainViews = villains.map((v, i) => ({
       key: v.key,
-      name: v.name,
+      name: displayName(i),
       position: v.position,
       rangeWidth: rangeWidth(ranges[i]),
       style: profiles[i].style,
@@ -1315,7 +1317,7 @@
   }
   function explain(ctx, best, options, eqAll, potOdds) {
     const reasons = [];
-    const names = ctx.villains.map((v) => v.name).join(" & ");
+    const names = ctx.profiles.map((p, i) => p.name || ctx.villains[i].name).join(" & ");
     reasons.push(`Win chance ${pct(eqAll)} vs ${names}'s likely hands`);
     if (ctx.toCall > 0 && !(ctx.preflop && ctx.raises === 0)) reasons.push(`Calling ${ctx.toCall} into ${ctx.s.pot} needs ${pct(potOdds)}`);
     if (ctx.preflop) {
@@ -1342,7 +1344,7 @@
       else if (p.style !== "balanced" && !p.style.startsWith("unknown")) reasons.push(`${p.name}: ${p.style}`);
     }
     const second = options.find((o) => o !== best);
-    if (second) reasons.push(`EV ${best.ev >= 0 ? "+" : ""}${fmt(best.ev)} vs ${second.label.toLowerCase()} ${second.ev >= 0 ? "+" : ""}${fmt(second.ev)}`);
+    if (second) reasons.push(`Expected ${best.ev >= 0 ? "+" : ""}${fmt(best.ev)} chips, next best is ${second.label} at ${second.ev >= 0 ? "+" : ""}${fmt(second.ev)}`);
     return reasons;
   }
 
@@ -1440,7 +1442,10 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
         const tab = t.closest("[data-tab]")?.dataset.tab;
         if (tab) this.showTab(tab);
         const act = t.closest("[data-act]")?.dataset.act;
-        if (act === "min") this.panel.classList.toggle("min");
+        if (act === "min") {
+          this.panel.classList.toggle("min");
+          this.saveLayout();
+        }
         if (act === "reset" && confirm("Reset the ledger for this lobby?")) this.actions.resetLedger();
         if (act === "capture") this.actions.saveCapture();
         const el = t.closest("[data-act]");
@@ -1494,9 +1499,13 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
         if (key !== drop.dataset.drop) this.actions.assign(key, drop.dataset.drop);
       });
       window.addEventListener("keydown", (e) => {
-        if (e.altKey && e.key.toLowerCase() === "b") this.panel.classList.toggle("min");
+        if (e.altKey && e.key.toLowerCase() === "b") {
+          this.panel.classList.toggle("min");
+          this.saveLayout();
+        }
       });
       this.makeDraggable();
+      this.restoreLayout();
     }
     root;
     panel;
@@ -1504,6 +1513,29 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
     advice = null;
     thinking = false;
     useReads = true;
+    saveLayout() {
+      try {
+        localStorage.setItem(
+          "pokerbot:layout",
+          JSON.stringify({ left: this.panel.style.left, top: this.panel.style.top, min: this.panel.classList.contains("min"), tab: this.tab })
+        );
+      } catch {
+      }
+    }
+    restoreLayout() {
+      try {
+        const l = JSON.parse(localStorage.getItem("pokerbot:layout") ?? "null");
+        if (!l) return;
+        if (l.left && l.top && parseInt(l.left) < window.innerWidth - 60 && parseInt(l.top) < window.innerHeight - 40) {
+          this.panel.style.left = l.left;
+          this.panel.style.top = l.top;
+          this.panel.style.right = "auto";
+        }
+        if (l.min) this.panel.classList.add("min");
+        if (l.tab) this.showTab(l.tab);
+      } catch {
+      }
+    }
     addPerson() {
       const input = this.root.querySelector("#pb-new-person");
       const label = input?.value.trim();
@@ -1530,10 +1562,14 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
         this.panel.style.top = `${Math.max(0, e.clientY - dy)}px`;
         this.panel.style.right = "auto";
       });
-      window.addEventListener("mouseup", () => dragging = false);
+      window.addEventListener("mouseup", () => {
+        if (dragging) this.saveLayout();
+        dragging = false;
+      });
     }
     showTab(tab) {
       this.tab = tab;
+      if (this.panel) this.saveLayout();
       this.root.querySelectorAll("[data-tab]").forEach((el) => el.classList.toggle("on", el.dataset.tab === tab));
       this.root.querySelectorAll("[data-pane]").forEach((el) => el.classList.toggle("on", el.dataset.pane === tab));
     }
@@ -1557,7 +1593,10 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
       this.renderAdvice(s);
       this.renderPlayers(s, model2);
       this.renderPeople(model2);
-      this.renderLedger(ledger);
+      this.renderLedger(ledger.map((r) => {
+        const person = model2.displayName(model2.resolve(r.key, r.name));
+        return { ...r, name: person && person !== r.key && person !== r.name ? `${person} (${r.name})` : r.name };
+      }));
     }
     renderAdvice(s) {
       const hero = s.players.find((p) => p.seat === s.heroSeat);
@@ -1575,11 +1614,16 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
         html += `<div class="rec ${a.best.action}">${esc(a.best.label)}</div>`;
         html += `<div class="kpis">
         <div class="kpi"><b>${pct2(a.equity)}</b><span>win chance</span></div>
-        <div class="kpi"><b>${a.toCall ? pct2(a.potOdds) : "\u2013"}</b><span>needed to call</span></div>
+        <div class="kpi"><b>${a.potOdds ? pct2(a.potOdds) : "\u2013"}</b><span>needed to call</span></div>
         <div class="kpi"><b>${a.toCall || 0}</b><span>to call</span></div></div>`;
         html += `<ul>${a.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`;
         html += `<table><tr><th>Option</th><th>EV (chips)</th></tr>${a.options.slice(0, 6).map((o, i) => `<tr class="${i === 0 ? "best" : ""}"><td>${esc(o.label)}</td><td>${o.ev >= 0 ? "+" : ""}${o.ev.toFixed(1)}</td></tr>`).join("")}</table>`;
-        html += a.villains.map((v) => `<div class="villain"><b>${esc(v.name)}</b> <span class="muted">${v.position ?? ""} \xB7 top ${pct2(v.rangeWidth)} \xB7 ${esc(v.style)}</span><br><span class="muted">${esc(v.likely.join(" "))}</span></div>`).join("");
+        html += a.villains.map((v) => {
+          const width = v.likely[0] === "any two cards" ? "any hand" : `top ${pct2(v.rangeWidth)} of hands`;
+          const style = v.style.startsWith("unknown") ? "still learning" : v.style;
+          const likely = v.likely[0] === "any two cards" ? "" : `<br><span class="muted">Likely: ${esc(v.likely.join(" "))}</span>`;
+          return `<div class="villain"><b>${esc(v.name)}</b> <span class="muted">${v.position ?? ""} \xB7 ${width} \xB7 ${esc(style)}</span>${likely}</div>`;
+        }).join("");
         if (!a.usedReads) html += `<div class="muted">Reads off: advice assumes typical opponents.</div>`;
         else if (!a.confident) html += `<div class="muted">Reads are still mostly default assumptions; they sharpen as hands are played.</div>`;
       }
@@ -1667,7 +1711,7 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
       for (const r of rows)
         html += `<tr><td>${esc(r.name)}</td><td>${r.buyIns}</td><td>${r.cashOuts}</td><td>${r.stack}</td><td class="${r.net >= 0 ? "pos" : "neg"}">${r.net >= 0 ? "+" : ""}${r.net}</td></tr>`;
       html += `</table><div class="muted">Net = cash-outs + stack \u2212 buy-ins. Re-buys and stack edits are picked up automatically.</div>
-      <div class="row"><button class="btn" data-act="reset">Reset ledger</button><button class="btn" data-act="capture">Save capture (debug)</button></div>`;
+      <div class="row"><button class="btn" data-act="reset">Reset ledger</button><button class="btn" data-act="capture" title="Saves tonight's game data so a misread hand can be checked">Save capture</button></div>`;
       this.pane("ledger").innerHTML = html;
     }
   };

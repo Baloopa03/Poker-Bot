@@ -104,6 +104,8 @@ export function advise(s: TableState, learned: OpponentModel, opts: AdvisorOptio
   const dealt = s.players.filter((p) => p.inHand).length;
   const headsUp = dealt === 2;
   const profiles = villains.map((v) => model.profile(v.key, v.name, dealt));
+  // Show your People names (e.g. "Isaiah") rather than tonight's guest name.
+  const displayName = (i: number) => profiles[i].name || villains[i].name;
   const ranges = villains.map((v, i) =>
     estimateRange({ key: v.key, profile: profiles[i], position: v.position, headsUp, players: dealt, actions: s.actions, board: s.board, dead: heroCards }),
   );
@@ -138,10 +140,11 @@ export function advise(s: TableState, learned: OpponentModel, opts: AdvisorOptio
   options.sort((a, b) => b.ev - a.ev);
   const best = options[0];
 
-  const potOdds = ctx.toCall > 0 ? ctx.toCall / (s.pot + ctx.toCall) : 0;
+  const limpSpot = ctx.preflop && ctx.raises === 0;
+  const potOdds = ctx.toCall > 0 && !limpSpot ? ctx.toCall / (s.pot + ctx.toCall) : 0;
   const villainViews: VillainView[] = villains.map((v, i) => ({
     key: v.key,
-    name: v.name,
+    name: displayName(i),
     position: v.position,
     rangeWidth: rangeWidth(ranges[i]),
     style: profiles[i].style,
@@ -468,7 +471,7 @@ function likelyClasses(range: Range, strengths: Float64Array): string[] {
 
 function explain(ctx: Ctx, best: AdviceOption, options: AdviceOption[], eqAll: number, potOdds: number): string[] {
   const reasons: string[] = [];
-  const names = ctx.villains.map((v) => v.name).join(" & ");
+  const names = ctx.profiles.map((p, i) => p.name || ctx.villains[i].name).join(" & ");
   reasons.push(`Win chance ${pct(eqAll)} vs ${names}'s likely hands`);
   if (ctx.toCall > 0 && !(ctx.preflop && ctx.raises === 0)) reasons.push(`Calling ${ctx.toCall} into ${ctx.s.pot} needs ${pct(potOdds)}`);
   if (ctx.preflop) {
@@ -495,6 +498,6 @@ function explain(ctx: Ctx, best: AdviceOption, options: AdviceOption[], eqAll: n
     else if (p.style !== "balanced" && !p.style.startsWith("unknown")) reasons.push(`${p.name}: ${p.style}`);
   }
   const second = options.find((o) => o !== best);
-  if (second) reasons.push(`EV ${best.ev >= 0 ? "+" : ""}${fmt(best.ev)} vs ${second.label.toLowerCase()} ${second.ev >= 0 ? "+" : ""}${fmt(second.ev)}`);
+  if (second) reasons.push(`Expected ${best.ev >= 0 ? "+" : ""}${fmt(best.ev)} chips, next best is ${second.label} at ${second.ev >= 0 ? "+" : ""}${fmt(second.ev)}`);
   return reasons;
 }

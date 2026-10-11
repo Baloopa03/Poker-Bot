@@ -7,15 +7,19 @@ plays, and shows the best play, with its reasoning, in a panel on the table.
 
 ## Install (no coding needed)
 
-1. Download this repo: green **Code** button → **Download ZIP**, then unzip it.
+1. On GitHub, open the repo, switch to the `claude/poker-bot-design-xpi1x8`
+   branch (or `main` once it's merged), click **Code → Download ZIP** and unzip it.
 2. Open `chrome://extensions` and turn on **Developer mode** (top right).
-3. Click **Load unpacked** and choose the **`extension`** folder inside the
+3. Remove any older copies: *Poker Bot (advisor)* or *Poker Bot Recorder*.
+4. Click **Load unpacked** and choose the **`extension`** folder inside the
    unzipped repo (the one containing `manifest.json`).
-4. Open (or refresh) your pokerpatio lobby. A **♠ Poker Bot** panel appears on
-   the right.
+5. Optional: click the puzzle-piece icon in Chrome's toolbar and pin ♠ Poker Bot.
+6. Open (or refresh) your pokerpatio lobby. The **♠ Poker Bot** panel appears on
+   the right. Drag it wherever suits you; it remembers the spot.
 
-Updating: download again, replace the folder, then click the ↻ reload icon on
-the extension in `chrome://extensions` and refresh the game tab.
+Updating: download again, replace the folder, click ↻ on the extension in
+`chrome://extensions`, then refresh the game tab. What it has learned about your
+mates is kept.
 
 ## Using it
 

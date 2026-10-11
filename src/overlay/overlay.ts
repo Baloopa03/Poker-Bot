@@ -124,7 +124,10 @@ export class Overlay {
       const tab = t.closest<HTMLElement>("[data-tab]")?.dataset.tab;
       if (tab) this.showTab(tab);
       const act = t.closest<HTMLElement>("[data-act]")?.dataset.act;
-      if (act === "min") this.panel.classList.toggle("min");
+      if (act === "min") {
+        this.panel.classList.toggle("min");
+        this.saveLayout();
+      }
       if (act === "reset" && confirm("Reset the ledger for this lobby?")) this.actions.resetLedger();
       if (act === "capture") this.actions.saveCapture();
       const el = t.closest<HTMLElement>("[data-act]");
@@ -179,9 +182,40 @@ export class Overlay {
       if (key !== drop.dataset.drop) this.actions.assign(key, drop.dataset.drop!);
     });
     window.addEventListener("keydown", (e) => {
-      if (e.altKey && e.key.toLowerCase() === "b") this.panel.classList.toggle("min");
+      if (e.altKey && e.key.toLowerCase() === "b") {
+        this.panel.classList.toggle("min");
+        this.saveLayout();
+      }
     });
     this.makeDraggable();
+    this.restoreLayout();
+  }
+
+  private saveLayout(): void {
+    try {
+      localStorage.setItem(
+        "pokerbot:layout",
+        JSON.stringify({ left: this.panel.style.left, top: this.panel.style.top, min: this.panel.classList.contains("min"), tab: this.tab }),
+      );
+    } catch {
+      /* storage blocked: layout just isn't remembered */
+    }
+  }
+
+  private restoreLayout(): void {
+    try {
+      const l = JSON.parse(localStorage.getItem("pokerbot:layout") ?? "null");
+      if (!l) return;
+      if (l.left && l.top && parseInt(l.left) < window.innerWidth - 60 && parseInt(l.top) < window.innerHeight - 40) {
+        this.panel.style.left = l.left;
+        this.panel.style.top = l.top;
+        this.panel.style.right = "auto";
+      }
+      if (l.min) this.panel.classList.add("min");
+      if (l.tab) this.showTab(l.tab);
+    } catch {
+      /* ignore */
+    }
   }
 
   private addPerson(): void {
@@ -211,11 +245,15 @@ export class Overlay {
       this.panel.style.top = `${Math.max(0, e.clientY - dy)}px`;
       this.panel.style.right = "auto";
     });
-    window.addEventListener("mouseup", () => (dragging = false));
+    window.addEventListener("mouseup", () => {
+      if (dragging) this.saveLayout();
+      dragging = false;
+    });
   }
 
   private showTab(tab: string): void {
     this.tab = tab;
+    if (this.panel) this.saveLayout();
     this.root.querySelectorAll<HTMLElement>("[data-tab]").forEach((el) => el.classList.toggle("on", el.dataset.tab === tab));
     this.root.querySelectorAll<HTMLElement>("[data-pane]").forEach((el) => el.classList.toggle("on", el.dataset.pane === tab));
   }
@@ -245,7 +283,10 @@ export class Overlay {
     this.renderAdvice(s);
     this.renderPlayers(s, model);
     this.renderPeople(model);
-    this.renderLedger(ledger);
+    this.renderLedger(ledger.map((r) => {
+      const person = model.displayName(model.resolve(r.key, r.name));
+      return { ...r, name: person && person !== r.key && person !== r.name ? `${person} (${r.name})` : r.name };
+    }));
   }
 
   private renderAdvice(s: TableState): void {
@@ -265,7 +306,7 @@ export class Overlay {
       html += `<div class="rec ${a.best.action}">${esc(a.best.label)}</div>`;
       html += `<div class="kpis">
         <div class="kpi"><b>${pct(a.equity)}</b><span>win chance</span></div>
-        <div class="kpi"><b>${a.toCall ? pct(a.potOdds) : "–"}</b><span>needed to call</span></div>
+        <div class="kpi"><b>${a.potOdds ? pct(a.potOdds) : "–"}</b><span>needed to call</span></div>
         <div class="kpi"><b>${a.toCall || 0}</b><span>to call</span></div></div>`;
       html += `<ul>${a.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`;
       html += `<table><tr><th>Option</th><th>EV (chips)</th></tr>${a.options
@@ -273,7 +314,12 @@ export class Overlay {
         .map((o, i) => `<tr class="${i === 0 ? "best" : ""}"><td>${esc(o.label)}</td><td>${o.ev >= 0 ? "+" : ""}${o.ev.toFixed(1)}</td></tr>`)
         .join("")}</table>`;
       html += a.villains
-        .map((v) => `<div class="villain"><b>${esc(v.name)}</b> <span class="muted">${v.position ?? ""} · top ${pct(v.rangeWidth)} · ${esc(v.style)}</span><br><span class="muted">${esc(v.likely.join(" "))}</span></div>`)
+        .map((v) => {
+          const width = v.likely[0] === "any two cards" ? "any hand" : `top ${pct(v.rangeWidth)} of hands`;
+          const style = v.style.startsWith("unknown") ? "still learning" : v.style;
+          const likely = v.likely[0] === "any two cards" ? "" : `<br><span class="muted">Likely: ${esc(v.likely.join(" "))}</span>`;
+          return `<div class="villain"><b>${esc(v.name)}</b> <span class="muted">${v.position ?? ""} · ${width} · ${esc(style)}</span>${likely}</div>`;
+        })
         .join("");
       if (!a.usedReads) html += `<div class="muted">Reads off: advice assumes typical opponents.</div>`;
       else if (!a.confident) html += `<div class="muted">Reads are still mostly default assumptions; they sharpen as hands are played.</div>`;
@@ -375,7 +421,7 @@ export class Overlay {
     for (const r of rows)
       html += `<tr><td>${esc(r.name)}</td><td>${r.buyIns}</td><td>${r.cashOuts}</td><td>${r.stack}</td><td class="${r.net >= 0 ? "pos" : "neg"}">${r.net >= 0 ? "+" : ""}${r.net}</td></tr>`;
     html += `</table><div class="muted">Net = cash-outs + stack − buy-ins. Re-buys and stack edits are picked up automatically.</div>
-      <div class="row"><button class="btn" data-act="reset">Reset ledger</button><button class="btn" data-act="capture">Save capture (debug)</button></div>`;
+      <div class="row"><button class="btn" data-act="reset">Reset ledger</button><button class="btn" data-act="capture" title="Saves tonight's game data so a misread hand can be checked">Save capture</button></div>`;
     this.pane("ledger").innerHTML = html;
   }
 }
