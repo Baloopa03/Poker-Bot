@@ -149,7 +149,9 @@ describe("opponent model", () => {
   it("learns from hand histories and stays near priors early", () => {
     const m = new OpponentModel();
     const p = m.profile("x");
-    expect(p.stat("vpip")).toBeCloseTo(0.5);
+    expect(p.stat("vpip")).toBeCloseTo(0.47);
+    expect(m.profile("x", "x", 2).stat("vpip")).toBeCloseTo(0.75); // heads-up is much looser
+    expect(m.profile("x", "x", 6).stat("vpip")).toBeCloseTo(0.25);
     for (let i = 0; i < 40; i++)
       m.update({
         handNumber: i,

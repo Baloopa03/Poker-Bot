@@ -103,7 +103,7 @@ export function advise(s: TableState, learned: OpponentModel, opts: AdvisorOptio
 
   const dealt = s.players.filter((p) => p.inHand).length;
   const headsUp = dealt === 2;
-  const profiles = villains.map((v) => model.profile(v.key, v.name));
+  const profiles = villains.map((v) => model.profile(v.key, v.name, dealt));
   const ranges = villains.map((v, i) =>
     estimateRange({ key: v.key, profile: profiles[i], position: v.position, headsUp, actions: s.actions, board: s.board, dead: heroCards }),
   );

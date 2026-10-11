@@ -27,33 +27,59 @@ export type StatName =
   | "wonAtShowdown"
   | "bluffShare";
 
-/** Prior mean and strength (in pseudo-observations) for each stat. Tuned for loose home games. */
+/** Table-size groups for preflop stats (how loose "normal" is depends on it). */
+export type TableBucket = "hu" | "3" | "6";
+export const bucketOf = (players: number): TableBucket => (players <= 2 ? "hu" : players <= 4 ? "3" : "6");
+
+const PREFLOP_STATS = new Set<StatName>(["vpip", "pfr", "limp", "steal", "foldToSteal", "threeBet", "foldTo3Bet", "callOpen"]);
+
+/**
+ * Starting assumptions before we have data on someone: roughly what sound,
+ * near-equilibrium play looks like. Preflop values depend on table size;
+ * postflop defence follows minimum-defence frequency against a ~2/3-pot bet
+ * (continue ~60%), and bluff share is the share of bets that are bluffs in a
+ * balanced 2/3-pot betting range (~30%). [mean, strength in pseudo-hands].
+ */
+const PREFLOP_PRIORS: Record<TableBucket, Partial<Record<StatName, number>>> = {
+  hu: { vpip: 0.75, pfr: 0.5, limp: 0.1, steal: 0.8, foldToSteal: 0.33, threeBet: 0.15, foldTo3Bet: 0.4, callOpen: 0.5 },
+  "3": { vpip: 0.47, pfr: 0.36, limp: 0.08, steal: 0.55, foldToSteal: 0.45, threeBet: 0.13, foldTo3Bet: 0.45, callOpen: 0.3 },
+  "6": { vpip: 0.25, pfr: 0.2, limp: 0.05, steal: 0.4, foldToSteal: 0.6, threeBet: 0.08, foldTo3Bet: 0.5, callOpen: 0.2 },
+};
+
 export const PRIORS: Record<StatName, [number, number]> = {
-  vpip: [0.5, 12],
-  pfr: [0.22, 12],
-  limp: [0.25, 8],
-  steal: [0.45, 8],
+  vpip: [0.47, 12],
+  pfr: [0.36, 12],
+  limp: [0.08, 8],
+  steal: [0.55, 8],
   foldToSteal: [0.45, 8],
-  threeBet: [0.1, 10],
+  threeBet: [0.13, 10],
   foldTo3Bet: [0.45, 6],
-  callOpen: [0.4, 8],
-  cbet: [0.6, 8],
+  callOpen: [0.3, 8],
+  cbet: [0.55, 8],
   foldToCbet: [0.4, 8],
   foldToBetFlop: [0.4, 8],
-  foldToBetTurn: [0.42, 8],
-  foldToBetRiver: [0.45, 8],
+  foldToBetTurn: [0.4, 8],
+  foldToBetRiver: [0.4, 8],
   raiseVsBet: [0.1, 10],
-  betWhenCheckedTo: [0.35, 8],
-  wtsd: [0.35, 8],
+  betWhenCheckedTo: [0.4, 8],
+  wtsd: [0.3, 8],
   wonAtShowdown: [0.5, 8],
   bluffShare: [0.3, 6],
 };
+
+export function prior(stat: StatName, bucket: TableBucket): [number, number] {
+  const [mean, k] = PRIORS[stat];
+  return [PREFLOP_PRIORS[bucket][stat] ?? mean, k];
+}
+
+const countKey = (stat: StatName, bucket: TableBucket) => (PREFLOP_STATS.has(stat) ? `${stat}@${bucket}` : stat);
 
 export interface PlayerStats {
   key: string;
   name: string;
   hands: number;
-  counts: Partial<Record<StatName, [hits: number, opportunities: number]>>;
+  /** [hits, opportunities] per stat; preflop stats are stored per table size as "vpip@3". */
+  counts: Record<string, [hits: number, opportunities: number]>;
   /** Other names this mate has played under. Any new account using one of these joins this profile. */
   aliasNames?: string[];
   /** Person name chosen by you (e.g. "Isaiah"); shown instead of the in-game name. */
@@ -84,7 +110,16 @@ export class OpponentModel {
     // v1 stored a bare array of players; v2 stores { players, aliases }.
     const d = data as { players?: PlayerStats[]; aliases?: Record<string, string> } | PlayerStats[] | null;
     const players = Array.isArray(d) ? d : (d?.players ?? []);
-    for (const p of players) if (p?.key) m.players.set(p.key, p);
+    for (const p of players) {
+      if (!p?.key) continue;
+      // Older saves kept preflop stats without a table size: those were 3-handed games.
+      for (const k of Object.keys(p.counts ?? {}))
+        if (PREFLOP_STATS.has(k as StatName)) {
+          p.counts[`${k}@3`] = p.counts[k];
+          delete p.counts[k];
+        }
+      m.players.set(p.key, p);
+    }
     if (!Array.isArray(d)) for (const [a, b] of Object.entries(d?.aliases ?? {})) m.aliases.set(a, b);
     return m;
   }
@@ -167,7 +202,7 @@ export class OpponentModel {
     const b = this.stats(into, this.players.get(into)?.name ?? into);
     if (a) {
       b.hands += a.hands;
-      for (const [stat, [hits, opps]] of Object.entries(a.counts) as Array<[StatName, [number, number]]>) {
+      for (const [stat, [hits, opps]] of Object.entries(a.counts)) {
         const c = (b.counts[stat] ??= [0, 0]);
         c[0] += hits;
         c[1] += opps;
@@ -192,18 +227,21 @@ export class OpponentModel {
     return s;
   }
 
+  private bucket: TableBucket = "3";
   private bump(s: PlayerStats, stat: StatName, hit: boolean): void {
-    const c = (s.counts[stat] ??= [0, 0]);
+    const c = (s.counts[countKey(stat, this.bucket)] ??= [0, 0]);
     c[1]++;
     if (hit) c[0]++;
   }
 
-  profile(key: string, name = key): Profile {
+  /** Smoothed tendencies; `tablePlayers` = how many were dealt in (preflop stats depend on it). */
+  profile(key: string, name = key, tablePlayers = 3): Profile {
     key = this.resolve(key, name);
+    const bucket = bucketOf(tablePlayers);
     const s = this.players.get(key) ?? { key, name, hands: 0, counts: {} };
     const stat = (n: StatName): number => {
-      const [mean, k] = PRIORS[n];
-      const [hits, opps] = s.counts[n] ?? [0, 0];
+      const [mean, k] = prior(n, bucket);
+      const [hits, opps] = s.counts[countKey(n, bucket)] ?? [0, 0];
       return (hits + mean * k) / (opps + k);
     };
     const foldToBet = (street: Street) =>
@@ -213,19 +251,22 @@ export class OpponentModel {
     const fold = (stat("foldToBetFlop") + stat("foldToBetTurn") + stat("foldToBetRiver")) / 3;
     let style = "unknown (few hands)";
     if (s.hands >= 15) {
-      if (vpip > 0.6 && fold < 0.35) style = "calling station";
-      else if (vpip > 0.55 && pfr > 0.35) style = "maniac";
-      else if (vpip < 0.3) style = pfr > 0.18 ? "tight-aggressive" : "nit";
-      else if (pfr / vpip > 0.6) style = "loose-aggressive";
-      else if (pfr / vpip < 0.35) style = "loose-passive";
-      else style = "balanced";
+      // Compare with what's normal for this table size.
+      const [nv] = prior("vpip", bucket);
+      const loose = vpip - nv;
+      const aggr = pfr / Math.max(0.01, vpip);
+      if (loose > 0.12 && fold < 0.3) style = "calling station";
+      else if (loose > 0.1 && aggr > 0.7) style = "maniac";
+      else if (loose < -0.12) style = aggr > 0.6 ? "tight-aggressive" : "nit";
+      else if (loose > 0.08) style = aggr > 0.55 ? "loose-aggressive" : "loose-passive";
+      else style = aggr < 0.45 ? "passive" : "solid";
     }
     return {
       key,
       name: s.label || s.name || name,
       hands: s.hands,
       stat,
-      raw: (n) => (s.counts[n] ?? [0, 0]) as [number, number],
+      raw: (n) => (s.counts[countKey(n, bucket)] ?? [0, 0]) as [number, number],
       foldToBet,
       style,
     };
@@ -253,6 +294,7 @@ export class OpponentModel {
   /** Learn from one finished hand. */
   update(hand: HandHistory): void {
     const h = this.resolveHistory(hand);
+    this.bucket = bucketOf(h.players.length);
     const pos = new Map<string, Position | undefined>(h.players.map((p) => [p.key, p.position]));
     const stats = new Map(h.players.map((p) => [p.key, this.stats(p.key, p.name)]));
     for (const s of stats.values()) s.hands++;
@@ -350,6 +392,7 @@ export class OpponentModel {
   }
 
   private bluffEvidence(h: HandHistory, key: string, cards: readonly Card[]): void {
+    this.bucket = bucketOf(h.players.length);
     const s = this.players.get(key);
     if (!s || cards.length !== 2) return;
     for (const street of POSTFLOP) {

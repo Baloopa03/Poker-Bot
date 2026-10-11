@@ -493,26 +493,38 @@
   }
 
   // src/opponents/model.ts
+  var bucketOf = (players) => players <= 2 ? "hu" : players <= 4 ? "3" : "6";
+  var PREFLOP_STATS = /* @__PURE__ */ new Set(["vpip", "pfr", "limp", "steal", "foldToSteal", "threeBet", "foldTo3Bet", "callOpen"]);
+  var PREFLOP_PRIORS = {
+    hu: { vpip: 0.75, pfr: 0.5, limp: 0.1, steal: 0.8, foldToSteal: 0.33, threeBet: 0.15, foldTo3Bet: 0.4, callOpen: 0.5 },
+    "3": { vpip: 0.47, pfr: 0.36, limp: 0.08, steal: 0.55, foldToSteal: 0.45, threeBet: 0.13, foldTo3Bet: 0.45, callOpen: 0.3 },
+    "6": { vpip: 0.25, pfr: 0.2, limp: 0.05, steal: 0.4, foldToSteal: 0.6, threeBet: 0.08, foldTo3Bet: 0.5, callOpen: 0.2 }
+  };
   var PRIORS = {
-    vpip: [0.5, 12],
-    pfr: [0.22, 12],
-    limp: [0.25, 8],
-    steal: [0.45, 8],
+    vpip: [0.47, 12],
+    pfr: [0.36, 12],
+    limp: [0.08, 8],
+    steal: [0.55, 8],
     foldToSteal: [0.45, 8],
-    threeBet: [0.1, 10],
+    threeBet: [0.13, 10],
     foldTo3Bet: [0.45, 6],
-    callOpen: [0.4, 8],
-    cbet: [0.6, 8],
+    callOpen: [0.3, 8],
+    cbet: [0.55, 8],
     foldToCbet: [0.4, 8],
     foldToBetFlop: [0.4, 8],
-    foldToBetTurn: [0.42, 8],
-    foldToBetRiver: [0.45, 8],
+    foldToBetTurn: [0.4, 8],
+    foldToBetRiver: [0.4, 8],
     raiseVsBet: [0.1, 10],
-    betWhenCheckedTo: [0.35, 8],
-    wtsd: [0.35, 8],
+    betWhenCheckedTo: [0.4, 8],
+    wtsd: [0.3, 8],
     wonAtShowdown: [0.5, 8],
     bluffShare: [0.3, 6]
   };
+  function prior(stat, bucket) {
+    const [mean, k] = PRIORS[stat];
+    return [PREFLOP_PRIORS[bucket][stat] ?? mean, k];
+  }
+  var countKey = (stat, bucket) => PREFLOP_STATS.has(stat) ? `${stat}@${bucket}` : stat;
   var POSTFLOP = ["flop", "turn", "river"];
   var norm = (n) => n.trim().toLowerCase();
   var OpponentModel = class _OpponentModel {
@@ -523,7 +535,15 @@
       const m = new _OpponentModel();
       const d = data;
       const players = Array.isArray(d) ? d : d?.players ?? [];
-      for (const p of players) if (p?.key) m.players.set(p.key, p);
+      for (const p of players) {
+        if (!p?.key) continue;
+        for (const k of Object.keys(p.counts ?? {}))
+          if (PREFLOP_STATS.has(k)) {
+            p.counts[`${k}@3`] = p.counts[k];
+            delete p.counts[k];
+          }
+        m.players.set(p.key, p);
+      }
       if (!Array.isArray(d)) for (const [a, b] of Object.entries(d?.aliases ?? {})) m.aliases.set(a, b);
       return m;
     }
@@ -620,17 +640,20 @@
       }
       return s;
     }
+    bucket = "3";
     bump(s, stat, hit) {
-      const c = s.counts[stat] ??= [0, 0];
+      const c = s.counts[countKey(stat, this.bucket)] ??= [0, 0];
       c[1]++;
       if (hit) c[0]++;
     }
-    profile(key, name = key) {
+    /** Smoothed tendencies; `tablePlayers` = how many were dealt in (preflop stats depend on it). */
+    profile(key, name = key, tablePlayers = 3) {
       key = this.resolve(key, name);
+      const bucket = bucketOf(tablePlayers);
       const s = this.players.get(key) ?? { key, name, hands: 0, counts: {} };
       const stat = (n) => {
-        const [mean, k] = PRIORS[n];
-        const [hits, opps] = s.counts[n] ?? [0, 0];
+        const [mean, k] = prior(n, bucket);
+        const [hits, opps] = s.counts[countKey(n, bucket)] ?? [0, 0];
         return (hits + mean * k) / (opps + k);
       };
       const foldToBet = (street) => street === "turn" ? stat("foldToBetTurn") : street === "river" ? stat("foldToBetRiver") : stat("foldToBetFlop");
@@ -639,19 +662,21 @@
       const fold = (stat("foldToBetFlop") + stat("foldToBetTurn") + stat("foldToBetRiver")) / 3;
       let style = "unknown (few hands)";
       if (s.hands >= 15) {
-        if (vpip > 0.6 && fold < 0.35) style = "calling station";
-        else if (vpip > 0.55 && pfr > 0.35) style = "maniac";
-        else if (vpip < 0.3) style = pfr > 0.18 ? "tight-aggressive" : "nit";
-        else if (pfr / vpip > 0.6) style = "loose-aggressive";
-        else if (pfr / vpip < 0.35) style = "loose-passive";
-        else style = "balanced";
+        const [nv] = prior("vpip", bucket);
+        const loose = vpip - nv;
+        const aggr = pfr / Math.max(0.01, vpip);
+        if (loose > 0.12 && fold < 0.3) style = "calling station";
+        else if (loose > 0.1 && aggr > 0.7) style = "maniac";
+        else if (loose < -0.12) style = aggr > 0.6 ? "tight-aggressive" : "nit";
+        else if (loose > 0.08) style = aggr > 0.55 ? "loose-aggressive" : "loose-passive";
+        else style = aggr < 0.45 ? "passive" : "solid";
       }
       return {
         key,
         name: s.label || s.name || name,
         hands: s.hands,
         stat,
-        raw: (n) => s.counts[n] ?? [0, 0],
+        raw: (n) => s.counts[countKey(n, bucket)] ?? [0, 0],
         foldToBet,
         style
       };
@@ -677,6 +702,7 @@
     /** Learn from one finished hand. */
     update(hand) {
       const h = this.resolveHistory(hand);
+      this.bucket = bucketOf(h.players.length);
       const pos = new Map(h.players.map((p) => [p.key, p.position]));
       const stats = new Map(h.players.map((p) => [p.key, this.stats(p.key, p.name)]));
       for (const s of stats.values()) s.hands++;
@@ -753,17 +779,26 @@
         this.bump(s, "wtsd", went);
         if (went) this.bump(s, "wonAtShowdown", (h.result?.won[k] ?? 0) > 0);
       }
-      for (const [key, cards] of Object.entries(shown)) {
-        const s = stats.get(key);
-        if (!s || cards.length !== 2) continue;
-        for (const street of POSTFLOP) {
-          const bets = h.actions.filter((a) => a.key === key && a.street === street && (a.type === "bet" || a.type === "raise"));
-          if (!bets.length) continue;
-          const board = h.board.slice(0, street === "flop" ? 3 : street === "turn" ? 4 : 5);
-          if (board.length < 3) continue;
-          const strength = handStrength(cards, board);
-          for (let i = 0; i < bets.length; i++) this.bump(s, "bluffShare", strength < 0.45);
-        }
+      for (const [key, cards] of Object.entries(shown)) this.bluffEvidence(h, key, cards);
+    }
+    /** Learn from cards a player showed after the hand (folded or uncontested). */
+    learnShown(hand, key) {
+      const h = this.resolveHistory(hand);
+      const k = this.resolve(key, hand.players.find((p) => p.key === key)?.name);
+      const cards = h.result?.shown[k];
+      if (cards) this.bluffEvidence(h, k, cards);
+    }
+    bluffEvidence(h, key, cards) {
+      this.bucket = bucketOf(h.players.length);
+      const s = this.players.get(key);
+      if (!s || cards.length !== 2) return;
+      for (const street of POSTFLOP) {
+        const bets = h.actions.filter((a) => a.key === key && a.street === street && (a.type === "bet" || a.type === "raise"));
+        if (!bets.length) continue;
+        const board = h.board.slice(0, street === "flop" ? 3 : street === "turn" ? 4 : 5);
+        if (board.length < 3) continue;
+        const strength = handStrength(cards, board);
+        for (let i = 0; i < bets.length; i++) this.bump(s, "bluffShare", strength < 0.45);
       }
     }
   };
@@ -927,7 +962,7 @@
     if (!villains.length) return null;
     const dealt = s.players.filter((p) => p.inHand).length;
     const headsUp = dealt === 2;
-    const profiles = villains.map((v) => model2.profile(v.key, v.name));
+    const profiles = villains.map((v) => model2.profile(v.key, v.name, dealt));
     const ranges = villains.map(
       (v, i) => estimateRange({ key: v.key, profile: profiles[i], position: v.position, headsUp, actions: s.actions, board: s.board, dead: heroCards })
     );
@@ -1458,7 +1493,8 @@ Any guest using one of these names is counted as ${label || "this person"}.`,
         this.pane("players").innerHTML = `<div class="muted">No opponents seen yet.</div>`;
         return;
       }
-      const profiles = keys.map((k) => model2.profile(k, s.players.find((p) => p.key === k)?.name ?? k));
+      const dealt = Math.max(2, s.players.filter((p) => p.inHand).length || s.players.length);
+      const profiles = keys.map((k) => model2.profile(k, s.players.find((p) => p.key === k)?.name ?? k, dealt));
       const allNames = (k) => {
         const p = model2.players.get(k);
         return p ? [.../* @__PURE__ */ new Set([p.name, ...p.aliasNames ?? []])].filter((n) => n && n !== p.label) : [];
@@ -1482,7 +1518,7 @@ Any guest using one of these names is counted as ${label || "this person"}.`,
         const st = model2.players.get(p.key);
         return `<td><button class="btn" data-act="edit" data-key="${esc(p.key)}" data-name="${esc(st?.name ?? p.name)}" data-label="${esc(st?.label ?? "")}" data-names="${esc(allNames(p.key).join("|"))}">Edit</button></td>`;
       }).join("")}</tr></table></div>`;
-      html += `<div class="muted">* fewer than 5 samples: mostly the default assumption. A guest who plays under a name already linked to someone is counted as that person automatically. Use <b>Edit</b> to give someone a name (e.g. Isaiah) and list the names they play under, or "Same person as\u2026" to combine two columns.</div>`;
+      html += `<div class="muted">Preflop numbers are for ${dealt <= 2 ? "heads-up" : dealt <= 4 ? "3\u20134 player" : "5+ player"} games. * fewer than 5 samples: mostly the default assumption. A guest who plays under a name already linked to someone is counted as that person automatically. Use <b>Edit</b> to give someone a name (e.g. Isaiah) and list the names they play under, or "Same person as\u2026" to combine two columns.</div>`;
       this.pane("players").innerHTML = html;
     }
     renderLedger(rows) {
@@ -1535,8 +1571,10 @@ Any guest using one of these names is counted as ${label || "this person"}.`,
     listeners = {
       update: [],
       heroTurn: [],
-      handComplete: []
+      handComplete: [],
+      handShown: []
     };
+    lastHistory;
     on(event, fn) {
       this.listeners[event].push(fn);
     }
@@ -1894,6 +1932,13 @@ Any guest using one of these names is counted as ${label || "this person"}.`,
         }
         p.stack = ps.stack;
         if (ps.playState) this.playState.set(key, ps.playState);
+        if (ps.revealedCardsToAll && Array.isArray(ps.cards) && p.cards.length < 2) {
+          for (const cd of ps.cards) {
+            const c = this.siteCard(cd?.cardData ?? cd);
+            if (c !== void 0 && !p.cards.includes(c)) p.cards.push(c);
+          }
+          this.maybeLateShow(p);
+        }
         if (!s.handActive) {
           p.committedHand = 0;
           p.committedStreet = 0;
@@ -2028,7 +2073,7 @@ Any guest using one of these names is counted as ${label || "this person"}.`,
       const card = this.siteCard(cd);
       if (!seat || card === void 0) return;
       const p = this.playerBySeat(seat);
-      if (s.street !== "showdown") {
+      if (s.handActive && s.street !== "showdown") {
         if (!s.heroSeat) this.setHero(seat);
         if (seat === s.heroSeat && !this.heroCardIds.has(uid)) {
           this.heroCardIds.add(uid);
@@ -2038,7 +2083,16 @@ Any guest using one of these names is counted as ${label || "this person"}.`,
       if (p && !this.seenCardIds.has(uid)) {
         this.seenCardIds.add(uid);
         p.cards.push(card);
+        this.maybeLateShow(p);
       }
+    }
+    /** A player chose to show their hand after it ended (e.g. after folding or winning uncontested). */
+    maybeLateShow(p) {
+      const h = this.lastHistory;
+      if (this.state.handActive || !h?.result || p.seat === this.state.heroSeat || p.cards.length !== 2) return;
+      if (h.result.shown[p.key]) return;
+      h.result.shown[p.key] = p.cards.slice();
+      this.emit("handShown", { history: h, key: p.key });
     }
     handEnded(a) {
       const s = this.state;
@@ -2086,6 +2140,7 @@ Any guest using one of these names is counted as ${label || "this person"}.`,
       s.toActSeat = void 0;
       s.currentBet = 0;
       this.recomputePot();
+      this.lastHistory = history;
       this.emit("handComplete", history);
       this.emit("update", s);
     }
@@ -2204,6 +2259,10 @@ Any guest using one of these names is counted as ${label || "this person"}.`,
     model.update(h);
     saveModel();
     saveLedger();
+  });
+  tracker.on("handShown", ({ history, key }) => {
+    model.learnShown(history, key);
+    saveModel();
   });
   tracker.on("update", () => render());
   window.addEventListener("message", (e) => {

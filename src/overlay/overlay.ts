@@ -261,7 +261,8 @@ export class Overlay {
       this.pane("players").innerHTML = `<div class="muted">No opponents seen yet.</div>`;
       return;
     }
-    const profiles = keys.map((k) => model.profile(k, s.players.find((p) => p.key === k)?.name ?? k));
+    const dealt = Math.max(2, s.players.filter((p) => p.inHand).length || s.players.length);
+    const profiles = keys.map((k) => model.profile(k, s.players.find((p) => p.key === k)?.name ?? k, dealt));
     const allNames = (k: string) => {
       const p = model.players.get(k);
       return p ? [...new Set([p.name, ...(p.aliasNames ?? [])])].filter((n) => n && n !== p.label) : [];
@@ -297,7 +298,7 @@ export class Overlay {
         return `<td><button class="btn" data-act="edit" data-key="${esc(p.key)}" data-name="${esc(st?.name ?? p.name)}" data-label="${esc(st?.label ?? "")}" data-names="${esc(allNames(p.key).join("|"))}">Edit</button></td>`;
       })
       .join("")}</tr></table></div>`;
-    html += `<div class="muted">* fewer than 5 samples: mostly the default assumption. A guest who plays under a name already linked to someone is counted as that person automatically. Use <b>Edit</b> to give someone a name (e.g. Isaiah) and list the names they play under, or "Same person as…" to combine two columns.</div>`;
+    html += `<div class="muted">Preflop numbers are for ${dealt <= 2 ? "heads-up" : dealt <= 4 ? "3–4 player" : "5+ player"} games. * fewer than 5 samples: mostly the default assumption. A guest who plays under a name already linked to someone is counted as that person automatically. Use <b>Edit</b> to give someone a name (e.g. Isaiah) and list the names they play under, or "Same person as…" to combine two columns.</div>`;
     this.pane("players").innerHTML = html;
   }
 
