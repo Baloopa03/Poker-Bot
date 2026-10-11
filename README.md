@@ -30,10 +30,14 @@ the extension in `chrome://extensions` and refresh the game tab.
   everyone in the lobby. It works whether or not you're the lobby admin.
 - **Use reads on mates** (Advice tab): switch off to ignore everything learned
   about your mates and get advice that treats everyone as a typical player.
-- **Same person as…** (Players tab): if a mate plays from a different account
-  or device, merge the two profiles. Their history is combined, and future
-  hands from either account count towards one profile. A name change on the
-  same account is recognised automatically.
+- **People** (Players tab): you all play as guests, so the bot counts any guest
+  using a name it already knows as that person. Click **Edit** under a player to
+  name them (e.g. "Isaiah") and list every name they play under ("Test2, Izzy").
+  Their history is combined, and future nights under any of those names add to it.
+  **Same person as…** combines two columns directly. If two mates ever share a
+  name, remove it from the list with Edit.
+- **Shown hands:** when a mate chooses to show after a hand (after folding, or
+  after winning without a showdown), the bot uses it to check how often they bluff.
 - **Alt+B** hides or shows the panel. Drag it by its title bar.
 
 What it learns about your mates is saved in your browser and carries over
@@ -60,6 +64,18 @@ npm run typecheck
 npm run build       # rebuilds ./extension
 node scripts/e2e.mjs                          # loads the extension in Chromium and replays a capture
 npx tsx scripts/advise-replay.ts <capture>    # prints the advice for every decision in a capture
+```
+
+### Simulator
+
+`sim/` is a separate test bench, not part of the extension. It deals real
+hands (blinds, side pots, re-buys) and the bot plays through the same advisor
+against scripted styles: `station`, `nit`, `maniac`, `solid`.
+
+```sh
+npx tsx sim/run.ts --hands 5000 --lineup station,nit            # bot vs a calling station and a nit
+npx tsx sim/run.ts --hands 5000 --lineup station,nit --reads off # same, ignoring reads
+npx tsx sim/run.ts --hands 5000 --lineup station,nit --hero solid # a scripted regular in the bot's seat, for comparison
 ```
 
 `tools/recorder/` is a standalone capture extension. The main extension can
