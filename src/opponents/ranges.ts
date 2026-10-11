@@ -2,7 +2,7 @@ import type { Card } from "../engine/cards";
 import { COMBOS, NUM_COMBOS, Range } from "../engine/range";
 import { comboStrengths, preflopComboStrengths } from "../engine/strength";
 import type { HandAction, Position, Street } from "../tracker/types";
-import type { Profile } from "./model";
+import { type Profile, sizeRatio } from "./model";
 
 // Estimate a villain's range by replaying their actions this hand. Each action
 // re-weights every combo by how likely this player is to take that action with
@@ -11,10 +11,18 @@ import type { Profile } from "./model";
 
 const SOFT = 0.045;
 const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
+// The blur scales with the slice: a "top 7%" read can't leak half the range in.
+const soft = (frac: number) => Math.min(SOFT, Math.max(0.012, 0.25 * frac));
 /** ~1 for the strongest `frac` of the range, ~0 below. */
-export const inTop = (q: number, frac: number) => sigmoid((q - (1 - Math.min(Math.max(frac, 0.005), 1))) / SOFT);
+export const inTop = (q: number, frac: number) => {
+  const f = Math.min(Math.max(frac, 0.005), 1);
+  return sigmoid((q - (1 - f)) / soft(f));
+};
 /** ~1 for the weakest `frac` of the range. */
-export const inBottom = (q: number, frac: number) => sigmoid((Math.min(Math.max(frac, 0.0), 1) - q) / SOFT);
+export const inBottom = (q: number, frac: number) => {
+  const f = Math.min(Math.max(frac, 0), 1);
+  return sigmoid((f - q) / soft(f));
+};
 
 const strengthCache = new Map<string, Float64Array>();
 export function boardStrengths(board: readonly Card[]): Float64Array {
@@ -70,6 +78,15 @@ function openFraction(profile: Profile, position: Position | undefined, players:
   if (players <= 2) return Math.min(0.95, pfr * 1.6);
   const factor = OPEN_FACTOR[players <= 4 ? "3" : "6"][position ?? "BB"] ?? 1;
   return Math.min(0.95, pfr * factor);
+}
+
+/**
+ * How much of a player's usual betting range still bets at this size: 1 at a
+ * normal ~2/3-pot bet, shrinking for overbets (a 10x-pot shove is mostly the
+ * very top of their range, or a bluff), slightly wider for small bets.
+ */
+export function sizeNarrowing(ratio: number): number {
+  return Math.min(1.25, Math.max(0.2, Math.pow(1.66 / (1 + Math.max(0, ratio)), 0.7)));
 }
 
 /** Continue frequency vs a bet of `ratio` × pot, from a base frequency measured around 2/3 pot. */
@@ -141,15 +158,26 @@ export function estimateRange(ctx: RangeContext): Range {
     const raiseFreq = profile.stat("raiseVsBet");
 
     if (a.facing === 0 || a.type === "check" || a.type === "bet") {
-      const pBet = (i: number) => inTop(q[i], betFreq * (1 - bluff)) + 0.8 * inBottom(q[i], betFreq * bluff);
-      if (a.type === "check") reweight(range, (i) => Math.max(0.12, 1 - pBet(i)));
+      // How polarised a bet is depends on its size and on this player's sizing habits.
+      const ratio = a.type === "bet" ? sizeRatio(a) : 0.66;
+      const b = a.type === "bet" ? profile.bluffFor(ratio) : bluff;
+      // Bigger bets come from a narrower, stronger slice of the range (plus bluffs).
+      const freq = betFreq * sizeNarrowing(ratio);
+      const pBet = (i: number) => inTop(q[i], freq * (1 - b)) + 0.8 * inBottom(q[i], freq * b);
+      // People check strong hands too (trapping, especially in limped pots), so checks never rule them out.
+      if (a.type === "check") reweight(range, (i) => Math.max(0.25, 1 - pBet(i)));
       else reweight(range, (i) => Math.max(0.01, pBet(i)));
     } else {
       const facingBet = a.type === "call" ? a.added : a.facing - (a.toTotal - a.added);
       const ratio = facingBet / Math.max(1, a.potBefore - facingBet);
       const cont = sizeAdjustedContinue(1 - profile.foldToBet(a.street), ratio);
       if (a.type === "call") reweight(range, (i) => 0.01 + inTop(q[i], cont) * (1 - 0.6 * inTop(q[i], raiseFreq * 0.7)));
-      else reweight(range, (i) => Math.max(0.01, inTop(q[i], Math.max(0.05, raiseFreq) * (1 - bluff)) + 0.5 * inBottom(q[i], raiseFreq * bluff)));
+      else {
+        const ratio = sizeRatio(a);
+        const b = profile.bluffFor(ratio);
+        const freq = Math.max(0.05, raiseFreq) * sizeNarrowing(ratio);
+        reweight(range, (i) => Math.max(0.01, inTop(q[i], freq * (1 - b)) + 0.5 * inBottom(q[i], freq * b)));
+      }
     }
   }
   return range;

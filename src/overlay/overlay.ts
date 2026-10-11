@@ -78,7 +78,7 @@ function cardHtml(cards: readonly Card[]): string {
   return cards
     .map((c) => {
       const s = cardsToString([c]);
-      return `<span class="${SUIT_CLASS[c & 3]}">${s[0]}${SUIT_SYMBOL[c & 3]}</span>`;
+      return `<span class="${SUIT_CLASS[c & 3]}">${s[0] === "T" ? "10" : s[0]}${SUIT_SYMBOL[c & 3]}</span>`;
     })
     .join(" ");
 }
@@ -354,7 +354,8 @@ export class Overlay {
         .map((v) => {
           const width = v.likely[0] === "any two cards" ? "any hand" : `top ${pct(v.rangeWidth)} of hands`;
           const style = v.style.startsWith("unknown") ? "still learning" : v.style;
-          const likely = v.likely[0] === "any two cards" ? "" : `<br><span class="muted">Likely: ${esc(v.likely.join(" "))}</span>`;
+          const comp = v.composition.filter(([, x]) => x >= 0.05).slice(0, 4).map(([k, x]) => `${k} ${pct(x)}`).join(" · ");
+          const likely = v.likely[0] === "any two cards" ? "" : `<br><span class="muted">${comp ? `Holding: ${esc(comp)}<br>` : ""}Likely: ${esc(v.likely.join(" "))}</span>`;
           return `<div class="villain"><b>${esc(v.name)}</b> <span class="muted">${v.position ?? ""} · ${width} · ${esc(style)}</span>${likely}</div>`;
         })
         .join("");

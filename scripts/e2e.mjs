@@ -60,6 +60,7 @@ await done;
 await page.waitForTimeout(800);
 const text = await page.evaluate(() => document.getElementById("pokerbot-overlay")?.shadowRoot?.querySelector(".panel")?.innerText ?? "NO OVERLAY");
 console.log(text);
+if (process.env.DETAILS) await page.evaluate(() => document.getElementById("pokerbot-overlay").shadowRoot.querySelector("details")?.setAttribute("open", ""));
 await page.screenshot({ path: join(shotDir, "e2e-advice.png") });
 await page.click('[data-act="settings"]');
 await page.waitForTimeout(100);

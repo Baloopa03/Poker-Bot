@@ -36,6 +36,17 @@
   var cardsToString = (cs) => cs.map(cardToString).join(" ");
 
   // src/engine/evaluator.ts
+  var CATEGORY_NAMES = [
+    "high card",
+    "pair",
+    "two pair",
+    "three of a kind",
+    "straight",
+    "flush",
+    "full house",
+    "four of a kind",
+    "straight flush"
+  ];
   var score = (cat, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0) => cat << 20 | r1 << 16 | r2 << 12 | r3 << 8 | r4 << 4 | r5;
   function straightHigh(mask) {
     for (let hi = 12; hi >= 4; hi--) {
@@ -111,6 +122,7 @@
     x = (x & 858993459) + (x >> 2 & 858993459);
     return (x + (x >> 4) & 252645135) * 16843009 >>> 24;
   }
+  var categoryOf = (s) => s >> 20;
 
   // src/engine/range.ts
   var NUM_COMBOS = 1326;
@@ -492,6 +504,135 @@
     return Float64Array.from(CLASS_OF_COMBO, (c) => s.get(c));
   }
 
+  // src/engine/texture.ts
+  var SUIT_NAMES = ["clubs", "diamonds", "hearts", "spades"];
+  var SUIT_SYMBOL = ["\u2663", "\u2666", "\u2665", "\u2660"];
+  var pretty = (c) => `${RANKS[rankOf(c)] === "T" ? "10" : RANKS[rankOf(c)]}${SUIT_SYMBOL[suitOf(c)]}`;
+  function features(board) {
+    const counts2 = new Array(13).fill(0);
+    const suits = new Array(4).fill(0);
+    let mask = 0;
+    for (const c of board) {
+      counts2[rankOf(c)]++;
+      suits[suitOf(c)]++;
+      mask |= 1 << rankOf(c);
+    }
+    let straightPossible = false;
+    const low = (mask & 1 << 12 ? 1 : 0) | (mask & 8191) << 1;
+    for (let start = 0; start <= 9; start++) {
+      let n = 0;
+      for (let k = 0; k < 5; k++) if (low & 1 << start + k) n++;
+      if (n >= 3) straightPossible = true;
+    }
+    const maxSuit = Math.max(...suits);
+    return {
+      paired: counts2.some((n) => n >= 2),
+      trips: counts2.some((n) => n >= 3),
+      maxSuit,
+      flushSuit: suits.indexOf(maxSuit),
+      straightPossible
+    };
+  }
+  function boardNotes(board) {
+    if (board.length < 3) return [];
+    const f = features(board);
+    const notes = [];
+    const prev = board.length > 3 ? features(board.slice(0, -1)) : void 0;
+    const last = board[board.length - 1];
+    if (prev) {
+      if (f.maxSuit >= 3 && prev.maxSuit < 3) notes.push(`The ${pretty(last)} made a flush possible`);
+      else if (f.maxSuit === 4 && prev.maxSuit === 3) notes.push(`The ${pretty(last)} put four ${SUIT_NAMES[f.flushSuit]} out: one ${SUIT_SYMBOL[f.flushSuit]} makes a flush`);
+      if (f.paired && !prev.paired) notes.push(`The ${pretty(last)} paired the board: full houses are now possible`);
+      if (f.straightPossible && !prev.straightPossible) notes.push(`The ${pretty(last)} made a straight possible`);
+    }
+    if (!notes.length) {
+      if (f.maxSuit >= 3) notes.push(`${f.maxSuit} ${SUIT_NAMES[f.flushSuit]} on board: flush possible`);
+      if (f.trips) notes.push("Trips on the board: everyone shares them, kickers and full houses decide");
+      else if (f.paired) notes.push("Paired board: full houses and trips are possible");
+      if (f.straightPossible && f.maxSuit < 3) notes.push("Straight possible");
+    }
+    return notes;
+  }
+  function boardCategory(board) {
+    if (board.length === 5) return categoryOf(evaluate(board));
+    const counts2 = new Array(13).fill(0);
+    for (const c of board) counts2[rankOf(c)]++;
+    const pairs = counts2.filter((n) => n === 2).length;
+    if (counts2.some((n) => n === 4)) return 7 /* Quads */;
+    if (counts2.some((n) => n === 3)) return 3 /* Trips */;
+    if (pairs >= 2) return 2 /* TwoPair */;
+    if (pairs === 1) return 1 /* Pair */;
+    return 0 /* HighCard */;
+  }
+  function playingTheBoard(hero, board) {
+    if (board.length < 3) return void 0;
+    const heroScore = evaluate([...hero, ...board]);
+    const cat = categoryOf(heroScore);
+    if (board.length === 5 && heroScore === evaluate(board)) return "You're playing the board: your cards don't improve it, so everyone left at least ties";
+    const bcat = boardCategory(board);
+    if (cat === bcat && (cat === 1 /* Pair */ || cat === 2 /* TwoPair */ || cat === 3 /* Trips */)) {
+      const kicker = Math.max(rankOf(hero[0]), rankOf(hero[1]));
+      const shared = cat === 1 /* Pair */ ? "pair" : cat === 2 /* TwoPair */ ? "two pair" : "trips";
+      return `The ${shared} is on the board, so everyone has it: your real hand is just ${RANKS[kicker] === "T" ? "10" : RANKS[kicker]}-high kicker`;
+    }
+    return void 0;
+  }
+  function rangeComposition(range, board, dead = []) {
+    if (board.length < 3) return [];
+    const isDead = new Uint8Array(52);
+    for (const c of [...board, ...dead]) isDead[c] = 1;
+    const seven = Int32Array.from([0, 0, ...board]);
+    const totals = /* @__PURE__ */ new Map();
+    let sum = 0;
+    const bcat = boardCategory(board);
+    for (let i = 0; i < NUM_COMBOS; i++) {
+      const w = range.w[i];
+      if (w <= 0) continue;
+      const [a, b] = COMBOS[i];
+      if (isDead[a] || isDead[b]) continue;
+      seven[0] = a;
+      seven[1] = b;
+      const cat = categoryOf(evaluate(seven, 2 + board.length));
+      let label;
+      if (cat <= bcat && cat <= 1 /* Pair */) {
+        label = board.length < 5 && hasDraw([a, b], board) ? "draw" : "no pair";
+      } else if (cat === 1 /* Pair */) label = pairKind([a, b], board);
+      else if (cat === 3 /* Trips */) label = rankCount([a, b], board) ? "set" : "trips";
+      else label = CATEGORY_NAMES[cat];
+      totals.set(label, (totals.get(label) ?? 0) + w);
+      sum += w;
+    }
+    if (sum <= 0) return [];
+    return [...totals.entries()].map(([k, v]) => [k, v / sum]).sort((x, y) => y[1] - x[1]);
+  }
+  function pairKind(hole, board) {
+    const top = Math.max(...board.map(rankOf));
+    const [r1, r2] = hole.map(rankOf);
+    if (r1 === r2) return r1 > top ? "overpair" : "weaker pair";
+    const paired = board.some((c) => rankOf(c) === r1) ? r1 : r2;
+    return paired === top ? "top pair" : "weaker pair";
+  }
+  function rankCount(hole, board) {
+    return rankOf(hole[0]) === rankOf(hole[1]) && board.some((c) => rankOf(c) === rankOf(hole[0]));
+  }
+  function hasDraw(hole, board) {
+    const cards = [...hole, ...board];
+    for (let s = 0; s < 4; s++) {
+      const n = cards.filter((c) => suitOf(c) === s).length;
+      if (n === 4 && hole.some((c) => suitOf(c) === s)) return true;
+    }
+    const ranks = new Set(cards.map(rankOf));
+    if (ranks.has(12)) ranks.add(-1);
+    const holeRanks = hole.map(rankOf);
+    for (let start = -1; start <= 8; start++) {
+      const window2 = [0, 1, 2, 3, 4].map((k) => start + k);
+      const have = window2.filter((r) => ranks.has(r)).length;
+      const usesHole = window2.some((r) => holeRanks.includes(r) || r === -1 && holeRanks.includes(12));
+      if (have === 4 && usesHole) return true;
+    }
+    return false;
+  }
+
   // src/opponents/model.ts
   var bucketOf = (players) => players <= 2 ? "hu" : players <= 4 ? "3" : "6";
   var PREFLOP_STATS = /* @__PURE__ */ new Set(["vpip", "pfr", "limp", "steal", "foldToSteal", "threeBet", "foldTo3Bet", "callOpen"]);
@@ -518,7 +659,10 @@
     betWhenCheckedTo: [0.4, 8],
     wtsd: [0.3, 8],
     wonAtShowdown: [0.5, 8],
-    bluffShare: [0.3, 6]
+    bluffShare: [0.3, 6],
+    // Per bet size (small < 0.6 pot ≤ big); priors come from the player's overall bluff share, see profile().
+    bluffShareSmall: [0.26, 6],
+    bluffShareBig: [0.34, 6]
   };
   function prior(stat, bucket) {
     const [mean, k] = PRIORS[stat];
@@ -722,6 +866,14 @@
         stat,
         raw: (n) => s.counts[countKey(n, bucket)] ?? [0, 0],
         foldToBet,
+        bluffFor: (ratio) => {
+          const big = ratio >= 0.6;
+          const overall = stat("bluffShare");
+          const mean = Math.min(0.9, Math.max(0.02, overall + (big ? 0.04 : -0.04)));
+          const [hits, opps] = s.counts[big ? "bluffShareBig" : "bluffShareSmall"] ?? [0, 0];
+          const k = PRIORS.bluffShareBig[1];
+          return (hits + mean * k) / (opps + k);
+        },
         style
       };
     }
@@ -842,10 +994,21 @@
         const board = h.board.slice(0, street === "flop" ? 3 : street === "turn" ? 4 : 5);
         if (board.length < 3) continue;
         const strength = handStrength(cards, board);
-        for (let i = 0; i < bets.length; i++) this.bump(s, "bluffShare", strength < 0.45);
+        for (const b of bets) {
+          const bluff = strength < 0.45;
+          this.bump(s, "bluffShare", bluff);
+          this.bump(s, sizeRatio(b) >= 0.6 ? "bluffShareBig" : "bluffShareSmall", bluff);
+        }
       }
     }
   };
+  function sizeRatio(a) {
+    const before = a.toTotal - a.added;
+    const callPart = Math.max(0, a.facing - before);
+    const raisePart = Math.max(0, a.toTotal - a.facing);
+    const potAfterCall = a.potBefore + callPart;
+    return raisePart / Math.max(1, potAfterCall);
+  }
   var strengthCache = /* @__PURE__ */ new Map();
   function handStrength(cards, board) {
     const k = board.join(",");
@@ -861,8 +1024,15 @@
   // src/opponents/ranges.ts
   var SOFT = 0.045;
   var sigmoid = (x) => 1 / (1 + Math.exp(-x));
-  var inTop = (q, frac) => sigmoid((q - (1 - Math.min(Math.max(frac, 5e-3), 1))) / SOFT);
-  var inBottom = (q, frac) => sigmoid((Math.min(Math.max(frac, 0), 1) - q) / SOFT);
+  var soft = (frac) => Math.min(SOFT, Math.max(0.012, 0.25 * frac));
+  var inTop = (q, frac) => {
+    const f = Math.min(Math.max(frac, 5e-3), 1);
+    return sigmoid((q - (1 - f)) / soft(f));
+  };
+  var inBottom = (q, frac) => {
+    const f = Math.min(Math.max(frac, 0), 1);
+    return sigmoid((f - q) / soft(f));
+  };
   var strengthCache2 = /* @__PURE__ */ new Map();
   function boardStrengths(board) {
     const k = board.join(",");
@@ -905,6 +1075,9 @@
     if (players <= 2) return Math.min(0.95, pfr * 1.6);
     const factor = OPEN_FACTOR[players <= 4 ? "3" : "6"][position ?? "BB"] ?? 1;
     return Math.min(0.95, pfr * factor);
+  }
+  function sizeNarrowing(ratio) {
+    return Math.min(1.25, Math.max(0.2, Math.pow(1.66 / (1 + Math.max(0, ratio)), 0.7)));
   }
   function sizeAdjustedContinue(base, ratio) {
     const mdf = (r) => 1 / (1 + r);
@@ -952,15 +1125,23 @@
       const betFreq = isCbetSpot ? profile.stat("cbet") : profile.stat("betWhenCheckedTo");
       const raiseFreq = profile.stat("raiseVsBet");
       if (a.facing === 0 || a.type === "check" || a.type === "bet") {
-        const pBet = (i) => inTop(q[i], betFreq * (1 - bluff)) + 0.8 * inBottom(q[i], betFreq * bluff);
-        if (a.type === "check") reweight(range, (i) => Math.max(0.12, 1 - pBet(i)));
+        const ratio = a.type === "bet" ? sizeRatio(a) : 0.66;
+        const b = a.type === "bet" ? profile.bluffFor(ratio) : bluff;
+        const freq = betFreq * sizeNarrowing(ratio);
+        const pBet = (i) => inTop(q[i], freq * (1 - b)) + 0.8 * inBottom(q[i], freq * b);
+        if (a.type === "check") reweight(range, (i) => Math.max(0.25, 1 - pBet(i)));
         else reweight(range, (i) => Math.max(0.01, pBet(i)));
       } else {
         const facingBet = a.type === "call" ? a.added : a.facing - (a.toTotal - a.added);
         const ratio = facingBet / Math.max(1, a.potBefore - facingBet);
         const cont = sizeAdjustedContinue(1 - profile.foldToBet(a.street), ratio);
         if (a.type === "call") reweight(range, (i) => 0.01 + inTop(q[i], cont) * (1 - 0.6 * inTop(q[i], raiseFreq * 0.7)));
-        else reweight(range, (i) => Math.max(0.01, inTop(q[i], Math.max(0.05, raiseFreq) * (1 - bluff)) + 0.5 * inBottom(q[i], raiseFreq * bluff)));
+        else {
+          const ratio2 = sizeRatio(a);
+          const b = profile.bluffFor(ratio2);
+          const freq = Math.max(0.05, raiseFreq) * sizeNarrowing(ratio2);
+          reweight(range, (i) => Math.max(0.01, inTop(q[i], freq * (1 - b)) + 0.5 * inBottom(q[i], freq * b)));
+        }
       }
     }
     return range;
@@ -1071,8 +1252,10 @@
       rangeWidth: rangeWidth(ranges[i]),
       style: profiles[i].style,
       hands: profiles[i].hands,
-      likely: likelyClasses(ranges[i], s.board.length >= 3 ? boardStrengths(s.board) : preflopComboStrengths())
+      likely: likelyClasses(ranges[i], s.board.length >= 3 ? boardStrengths(s.board) : preflopComboStrengths()),
+      composition: rangeComposition(ranges[i], s.board, heroCards)
     }));
+    const notes = boardNotes(s.board);
     return {
       street: s.street,
       best,
@@ -1081,7 +1264,12 @@
       toCall: ctx.toCall,
       pot: s.pot,
       potOdds,
-      reasons: useReads2 ? explain(ctx, best, options, eqAll, potOdds) : ["Reads off: everyone treated as a typical player", ...explain(ctx, best, options, eqAll, potOdds)],
+      reasons: [
+        ...useReads2 ? [] : ["Reads off: everyone treated as a typical player"],
+        ...boardReasons(ctx, villainViews, notes),
+        ...explain(ctx, best, options, eqAll, potOdds)
+      ],
+      boardNotes: notes,
       villains: villainViews,
       heroCards: cardsToString(heroCards),
       confident: !useReads2 || profiles.every((p) => p.hands >= 25),
@@ -1349,6 +1537,26 @@
     if (rows.length > 120 && rows.every((r) => r.avg > 0.9 * maxAvg)) return ["any two cards"];
     return rows.filter((r) => r.avg >= 0.5 * maxAvg).sort((x, y) => y.st - x.st).slice(0, 8).map((r) => r.c);
   }
+  function boardReasons(ctx, villains, notes) {
+    const out = [];
+    const board = playingTheBoard(ctx.heroCards, ctx.s.board);
+    if (board) out.push(board);
+    if (ctx.preflop) return out;
+    const aggressor = [...ctx.s.actions].reverse().find((a) => a.street === ctx.s.street && (a.type === "bet" || a.type === "raise"));
+    if (aggressor && ctx.toCall > 0) {
+      const v = villains.find((x) => x.key === aggressor.key);
+      if (v?.composition.length) {
+        const top = v.composition.filter(([, share]) => share >= 0.08).slice(0, 4);
+        const what = top.map(([k, share]) => `${k} ${pct(share)}`).join(", ");
+        const last = ctx.s.board[ctx.s.board.length - 1];
+        const lastText = cardsToString([last]).replace(/^T/, "10").replace(/[cdhs]$/, (x) => ({ c: "\u2663", d: "\u2666", h: "\u2665", s: "\u2660" })[x]);
+        const card = ctx.s.board.length > 3 ? `After the ${lastText}, ` : "";
+        out.push(`${card}${v.name}'s ${aggressor.type} most likely means: ${what}`);
+      }
+    }
+    if (notes[0] && !out.some((r) => r.includes(notes[0]))) out.push(notes[0]);
+    return out;
+  }
   function explain(ctx, best, options, eqAll, potOdds) {
     const reasons = [];
     const names = ctx.profiles.map((p, i) => p.name || ctx.villains[i].name).join(" & ");
@@ -1446,13 +1654,13 @@ details.more summary { cursor: pointer; color: #8ab4f8; font-size: 12px; margin-
 select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-radius: 4px; font: inherit; font-size: 11px; max-width: 90px; }
 `;
   var SUIT_CLASS = ["c", "d", "h", "s"];
-  var SUIT_SYMBOL = ["\u2663", "\u2666", "\u2665", "\u2660"];
+  var SUIT_SYMBOL2 = ["\u2663", "\u2666", "\u2665", "\u2660"];
   var pct2 = (x) => `${Math.round(x * 100)}%`;
   var esc = (t) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
   function cardHtml(cards) {
     return cards.map((c) => {
       const s = cardsToString([c]);
-      return `<span class="${SUIT_CLASS[c & 3]}">${s[0]}${SUIT_SYMBOL[c & 3]}</span>`;
+      return `<span class="${SUIT_CLASS[c & 3]}">${s[0] === "T" ? "10" : s[0]}${SUIT_SYMBOL2[c & 3]}</span>`;
     }).join(" ");
   }
   var Overlay = class {
@@ -1687,7 +1895,8 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
         html += a.villains.map((v) => {
           const width = v.likely[0] === "any two cards" ? "any hand" : `top ${pct2(v.rangeWidth)} of hands`;
           const style = v.style.startsWith("unknown") ? "still learning" : v.style;
-          const likely = v.likely[0] === "any two cards" ? "" : `<br><span class="muted">Likely: ${esc(v.likely.join(" "))}</span>`;
+          const comp = v.composition.filter(([, x]) => x >= 0.05).slice(0, 4).map(([k, x]) => `${k} ${pct2(x)}`).join(" \xB7 ");
+          const likely = v.likely[0] === "any two cards" ? "" : `<br><span class="muted">${comp ? `Holding: ${esc(comp)}<br>` : ""}Likely: ${esc(v.likely.join(" "))}</span>`;
           return `<div class="villain"><b>${esc(v.name)}</b> <span class="muted">${v.position ?? ""} \xB7 ${width} \xB7 ${esc(style)}</span>${likely}</div>`;
         }).join("");
         const rest = a.reasons.filter((r) => !key.slice(0, 3).includes(r));

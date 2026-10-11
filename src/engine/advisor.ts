@@ -2,6 +2,7 @@ import { type Card, cardsToString } from "./cards";
 import { equity, riverEquityExact } from "./equity";
 import { COMBOS as COMBO_CARDS, NUM_COMBOS, Range, classOf } from "./range";
 import { preflopComboStrengths, preflopScores } from "./strength";
+import { boardNotes, playingTheBoard, rangeComposition } from "./texture";
 import { OpponentModel, type Profile } from "../opponents/model";
 import { bettingSplit, boardStrengths, estimateRange, rangeWidth, respondToBet } from "../opponents/ranges";
 import type { PlayerState, Position, TableState } from "../tracker/types";
@@ -38,6 +39,8 @@ export interface VillainView {
   hands: number;
   /** A few of the most likely hand classes. */
   likely: string[];
+  /** What their range is made of on this board, e.g. [["flush", 0.38], …]. */
+  composition: Array<[string, number]>;
 }
 
 export interface Advice {
@@ -51,6 +54,8 @@ export interface Advice {
   /** Equity needed to call (0 if nothing to call). */
   potOdds: number;
   reasons: string[];
+  /** Plain notes about the board ("The 9♥ made a flush possible"). */
+  boardNotes: string[];
   villains: VillainView[];
   heroCards: string;
   /** False while reads are mostly priors (few hands seen). */
@@ -150,7 +155,9 @@ export function advise(s: TableState, learned: OpponentModel, opts: AdvisorOptio
     style: profiles[i].style,
     hands: profiles[i].hands,
     likely: likelyClasses(ranges[i], s.board.length >= 3 ? boardStrengths(s.board) : preflopComboStrengths()),
+    composition: rangeComposition(ranges[i], s.board, heroCards),
   }));
+  const notes = boardNotes(s.board);
 
   return {
     street: s.street,
@@ -160,7 +167,12 @@ export function advise(s: TableState, learned: OpponentModel, opts: AdvisorOptio
     toCall: ctx.toCall,
     pot: s.pot,
     potOdds,
-    reasons: useReads ? explain(ctx, best, options, eqAll, potOdds) : ["Reads off: everyone treated as a typical player", ...explain(ctx, best, options, eqAll, potOdds)],
+    reasons: [
+      ...(useReads ? [] : ["Reads off: everyone treated as a typical player"]),
+      ...boardReasons(ctx, villainViews, notes),
+      ...explain(ctx, best, options, eqAll, potOdds),
+    ],
+    boardNotes: notes,
     villains: villainViews,
     heroCards: cardsToString(heroCards),
     confident: !useReads || profiles.every((p) => p.hands >= 25),
@@ -492,6 +504,32 @@ function likelyClasses(range: Range, strengths: Float64Array): string[] {
     .sort((x, y) => y.st - x.st)
     .slice(0, 8)
     .map((r) => r.c);
+}
+
+/**
+ * Board-aware reasons that go first: a warning when your hand is really the
+ * board, and when someone bets or raises, what that most likely means given
+ * the card that just came.
+ */
+function boardReasons(ctx: Ctx, villains: VillainView[], notes: string[]): string[] {
+  const out: string[] = [];
+  const board = playingTheBoard(ctx.heroCards, ctx.s.board);
+  if (board) out.push(board);
+  if (ctx.preflop) return out;
+  const aggressor = [...ctx.s.actions].reverse().find((a) => a.street === ctx.s.street && (a.type === "bet" || a.type === "raise"));
+  if (aggressor && ctx.toCall > 0) {
+    const v = villains.find((x) => x.key === aggressor.key);
+    if (v?.composition.length) {
+      const top = v.composition.filter(([, share]) => share >= 0.08).slice(0, 4);
+      const what = top.map(([k, share]) => `${k} ${pct(share)}`).join(", ");
+      const last = ctx.s.board[ctx.s.board.length - 1];
+      const lastText = cardsToString([last]).replace(/^T/, "10").replace(/[cdhs]$/, (x) => ({ c: "♣", d: "♦", h: "♥", s: "♠" })[x]!);
+      const card = ctx.s.board.length > 3 ? `After the ${lastText}, ` : "";
+      out.push(`${card}${v.name}'s ${aggressor.type} most likely means: ${what}`);
+    }
+  }
+  if (notes[0] && !out.some((r) => r.includes(notes[0]))) out.push(notes[0]);
+  return out;
 }
 
 function explain(ctx: Ctx, best: AdviceOption, options: AdviceOption[], eqAll: number, potOdds: number): string[] {

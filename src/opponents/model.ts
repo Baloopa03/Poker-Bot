@@ -1,7 +1,7 @@
 import type { Card } from "../engine/cards";
 import { comboIndex } from "../engine/range";
 import { comboStrengths } from "../engine/strength";
-import type { HandHistory, Position, Street } from "../tracker/types";
+import type { HandAction, HandHistory, Position, Street } from "../tracker/types";
 
 // Per-player tendencies learned from hand histories, keyed by account so they
 // survive re-buys. Every stat is shrunk towards a prior until there is enough
@@ -25,7 +25,9 @@ export type StatName =
   | "betWhenCheckedTo"
   | "wtsd"
   | "wonAtShowdown"
-  | "bluffShare";
+  | "bluffShare"
+  | "bluffShareSmall"
+  | "bluffShareBig";
 
 /** Table-size groups for preflop stats (how loose "normal" is depends on it). */
 export type TableBucket = "hu" | "3" | "6";
@@ -65,6 +67,9 @@ export const PRIORS: Record<StatName, [number, number]> = {
   wtsd: [0.3, 8],
   wonAtShowdown: [0.5, 8],
   bluffShare: [0.3, 6],
+  // Per bet size (small < 0.6 pot ≤ big); priors come from the player's overall bluff share, see profile().
+  bluffShareSmall: [0.26, 6],
+  bluffShareBig: [0.34, 6],
 };
 
 export function prior(stat: StatName, bucket: TableBucket): [number, number] {
@@ -96,6 +101,12 @@ export interface Profile {
   /** Raw [hits, opportunities] for display. */
   raw(name: StatName): [number, number];
   foldToBet(street: Street): number;
+  /**
+   * Share of this player's bets/raises of this size that are bluffs. Starts
+   * from theory (bigger bets carry a few more bluffs) around their overall
+   * bluff share, then follows what their showdowns reveal at each size.
+   */
+  bluffFor(sizeRatio: number): number;
   style: string;
 }
 
@@ -321,6 +332,14 @@ export class OpponentModel {
       stat,
       raw: (n) => (s.counts[countKey(n, bucket)] ?? [0, 0]) as [number, number],
       foldToBet,
+      bluffFor: (ratio: number) => {
+        const big = ratio >= 0.6;
+        const overall = stat("bluffShare");
+        const mean = Math.min(0.9, Math.max(0.02, overall + (big ? 0.04 : -0.04)));
+        const [hits, opps] = s.counts[big ? "bluffShareBig" : "bluffShareSmall"] ?? [0, 0];
+        const k = PRIORS.bluffShareBig[1];
+        return (hits + mean * k) / (opps + k);
+      },
       style,
     };
   }
@@ -454,9 +473,22 @@ export class OpponentModel {
       const board = h.board.slice(0, street === "flop" ? 3 : street === "turn" ? 4 : 5);
       if (board.length < 3) continue;
       const strength = handStrength(cards as [Card, Card], board);
-      for (let i = 0; i < bets.length; i++) this.bump(s, "bluffShare", strength < 0.45);
+      for (const b of bets) {
+        const bluff = strength < 0.45;
+        this.bump(s, "bluffShare", bluff);
+        this.bump(s, sizeRatio(b) >= 0.6 ? "bluffShareBig" : "bluffShareSmall", bluff);
+      }
     }
   }
+}
+
+/** Size of a bet or raise as a fraction of the pot it was made into (what players call "x% pot"). */
+export function sizeRatio(a: HandAction): number {
+  const before = a.toTotal - a.added; // already committed this street
+  const callPart = Math.max(0, a.facing - before);
+  const raisePart = Math.max(0, a.toTotal - a.facing);
+  const potAfterCall = a.potBefore + callPart;
+  return raisePart / Math.max(1, potAfterCall);
 }
 
 const strengthCache = new Map<string, Float64Array>();
