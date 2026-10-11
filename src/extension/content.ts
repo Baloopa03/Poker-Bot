@@ -42,6 +42,14 @@ const overlay = new Overlay({
     storage?.set({ [SETTINGS_KEY]: { useReads } });
     recomputeAdvice();
   },
+  editPerson(key, label, names, removed) {
+    for (const n of removed) model.removeName(key, n);
+    for (const n of names) model.addName(key, n);
+    model.setLabel(key, label);
+    saveModel();
+    recomputeAdvice();
+    render();
+  },
   merge(fromKey, intoKey) {
     model.merge(fromKey, intoKey);
     saveModel();

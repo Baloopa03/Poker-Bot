@@ -217,3 +217,43 @@ describe("profile merging and reads toggle", () => {
     expect(off.options.map((o) => o.ev)).toEqual(fresh.options.map((o) => o.ev));
   });
 });
+
+describe("people for guest accounts", () => {
+  const h = (key: string, name: string) => ({
+    handNumber: 1,
+    sb: 8,
+    bb: 15,
+    board: [],
+    players: [
+      { key, name, seat: "s1", startStack: 500, position: "BTN" as const },
+      { key: "me", name: "Me", seat: "s2", startStack: 500, position: "BB" as const },
+    ],
+    actions: [{ key, seat: "s1", street: "preflop" as const, type: "raise" as const, added: 38, toTotal: 38, facing: 15, potBefore: 23, allIn: false, raisesBefore: 0, auto: false }],
+  });
+
+  it("joins a new guest account to the person who used that name before", () => {
+    const m = new OpponentModel();
+    m.update(h("guest-night1", "Justin"));
+    m.update(h("guest-night2", "justin")); // new guest account, same name
+    expect(m.profile("guest-night2", "justin").hands).toBe(2);
+    expect(m.players.size).toBe(2); // Justin + me
+  });
+
+  it("names a person and collects every name they play under", () => {
+    const m = new OpponentModel();
+    m.update(h("g1", "Test2"));
+    m.update(h("g2", "Izzy"));
+    m.setLabel("g1", "Isaiah");
+    m.addName("g1", "Izzy"); // merges the existing Izzy profile
+    expect(m.profile("g2", "Izzy").name).toBe("Isaiah");
+    expect(m.profile("g1").hands).toBe(2);
+    m.update(h("g3", "isaiah")); // a later night under his real name
+    m.update(h("g4", "Test2"));
+    expect(m.profile("g1").hands).toBe(4);
+    m.removeName("g1", "Test2");
+    m.update(h("g5", "Test2")); // someone else uses Test2 now
+    expect(m.profile("g1").hands).toBe(4);
+    const restored = OpponentModel.fromJSON(JSON.parse(JSON.stringify(m.toJSON())));
+    expect(restored.profile("g4").name).toBe("Isaiah");
+  });
+});

@@ -54,8 +54,10 @@ export interface PlayerStats {
   name: string;
   hands: number;
   counts: Partial<Record<StatName, [hits: number, opportunities: number]>>;
-  /** Other names this mate has played under (from merges). */
+  /** Other names this mate has played under. Any new account using one of these joins this profile. */
   aliasNames?: string[];
+  /** Person name chosen by you (e.g. "Isaiah"); shown instead of the in-game name. */
+  label?: string;
 }
 
 export interface Profile {
@@ -70,6 +72,7 @@ export interface Profile {
 }
 
 const POSTFLOP: Street[] = ["flop", "turn", "river"];
+const norm = (n: string) => n.trim().toLowerCase();
 
 export class OpponentModel {
   readonly players = new Map<string, PlayerStats>();
@@ -89,11 +92,67 @@ export class OpponentModel {
     return { players: [...this.players.values()], aliases: Object.fromEntries(this.aliases) };
   }
 
-  /** The profile key a player's hands are recorded under (follows merges). */
-  resolve(key: string): string {
+  /**
+   * The profile key a player's hands are recorded under. Follows merges, and
+   * (because guests get a fresh account whenever they like) links an unknown
+   * account to an existing profile that has played under the same name.
+   */
+  resolve(key: string, name?: string): string {
     let k = key;
     for (let i = 0; i < 10 && this.aliases.has(k); i++) k = this.aliases.get(k)!;
+    if (this.players.has(k) || !name) return k;
+    const owner = this.findByName(name);
+    if (owner && owner !== k) {
+      this.aliases.set(k, owner);
+      return owner;
+    }
     return k;
+  }
+
+  /** Profile that uses this name (person name, current name or a known alias), case-insensitive. */
+  findByName(name: string): string | undefined {
+    const n = norm(name);
+    if (!n) return undefined;
+    for (const p of this.players.values())
+      if (norm(p.label ?? "") === n || norm(p.name) === n || p.aliasNames?.some((a) => norm(a) === n)) return p.key;
+    return undefined;
+  }
+
+  /** Display name: your label for the person if set, else their latest in-game name. */
+  displayName(key: string): string {
+    const p = this.players.get(this.resolve(key));
+    return p?.label || p?.name || key;
+  }
+
+  /** Name a person (e.g. "Isaiah"). Also merges any other profile already using that name. */
+  setLabel(key: string, label: string): void {
+    const k = this.resolve(key);
+    const p = this.players.get(k);
+    if (!p) return;
+    const clean = label.trim();
+    p.label = clean || undefined;
+    if (clean) this.addName(k, clean);
+  }
+
+  /** Tie another in-game name to this person: past profiles with it merge in, future accounts with it join automatically. */
+  addName(key: string, name: string): void {
+    const k = this.resolve(key);
+    const p = this.players.get(k);
+    const clean = name.trim();
+    if (!p || !clean) return;
+    for (const other of [...this.players.values()])
+      if (other.key !== k && (norm(other.name) === norm(clean) || norm(other.label ?? "") === norm(clean) || other.aliasNames?.some((a) => norm(a) === norm(clean))))
+        this.merge(other.key, k);
+    if (norm(p.name) !== norm(clean) && !p.aliasNames?.some((a) => norm(a) === norm(clean))) p.aliasNames = [...(p.aliasNames ?? []), clean];
+  }
+
+  /** Stop treating a name as this person (e.g. two mates both used "Test" once). Past stats stay. */
+  removeName(key: string, name: string): void {
+    const p = this.players.get(this.resolve(key));
+    if (!p) return;
+    p.aliasNames = p.aliasNames?.filter((a) => norm(a) !== norm(name));
+    // The latest in-game name also links accounts; fall back to the person name.
+    if (norm(p.name) === norm(name)) p.name = p.label || p.aliasNames?.[0] || p.name;
   }
 
   /**
@@ -140,7 +199,7 @@ export class OpponentModel {
   }
 
   profile(key: string, name = key): Profile {
-    key = this.resolve(key);
+    key = this.resolve(key, name);
     const s = this.players.get(key) ?? { key, name, hands: 0, counts: {} };
     const stat = (n: StatName): number => {
       const [mean, k] = PRIORS[n];
@@ -163,7 +222,7 @@ export class OpponentModel {
     }
     return {
       key,
-      name: s.name ?? name,
+      name: s.label || s.name || name,
       hands: s.hands,
       stat,
       raw: (n) => (s.counts[n] ?? [0, 0]) as [number, number],
@@ -173,8 +232,8 @@ export class OpponentModel {
   }
 
   private resolveHistory(h: HandHistory): HandHistory {
-    if (!this.aliases.size) return h;
-    const r = (k: string) => this.resolve(k);
+    const names = new Map(h.players.map((p) => [p.key, p.name]));
+    const r = (k: string) => this.resolve(k, names.get(k));
     const remap = <T>(o: Record<string, T>) => Object.fromEntries(Object.entries(o).map(([k, v]) => [r(k), v]));
     return {
       ...h,

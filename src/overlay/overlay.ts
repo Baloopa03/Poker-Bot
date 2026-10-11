@@ -69,6 +69,8 @@ export interface OverlayActions {
   setUseReads(on: boolean): void;
   /** Merge profile `fromKey` into `intoKey` (same mate, different account). */
   merge(fromKey: string, intoKey: string): void;
+  /** Set the person name and the in-game names that belong to them. */
+  editPerson(key: string, label: string, names: string[], removed: string[]): void;
 }
 
 export class Overlay {
@@ -107,6 +109,7 @@ export class Overlay {
       if (act === "min") this.panel.classList.toggle("min");
       if (act === "reset" && confirm("Reset the ledger for this lobby?")) this.actions.resetLedger();
       if (act === "capture") this.actions.saveCapture();
+      if (act === "edit") this.editPerson(t.closest<HTMLElement>("[data-act]")!);
     });
     this.root.addEventListener("change", (e) => {
       const t = e.target as HTMLInputElement | HTMLSelectElement;
@@ -124,6 +127,22 @@ export class Overlay {
       if (e.altKey && e.key.toLowerCase() === "b") this.panel.classList.toggle("min");
     });
     this.makeDraggable();
+  }
+
+  private editPerson(el: HTMLElement): void {
+    const key = el.dataset.key!;
+    const current = el.dataset.label ?? "";
+    const names = (el.dataset.names ?? "").split("|").filter(Boolean);
+    const label = prompt("Who is this? (e.g. Isaiah)", current || el.dataset.name || "");
+    if (label === null) return;
+    const list = prompt(
+      `Names ${label || "they"} plays under, comma separated.\nAny guest using one of these names is counted as ${label || "this person"}.`,
+      names.join(", "),
+    );
+    if (list === null) return;
+    const next = list.split(",").map((n) => n.trim()).filter(Boolean);
+    const removed = names.filter((n) => !next.some((m) => m.toLowerCase() === n.toLowerCase()));
+    this.actions.editPerson(key, label, next, removed);
   }
 
   private makeDraggable(): void {
@@ -215,13 +234,13 @@ export class Overlay {
   }
 
   private renderPlayers(s: TableState, model: OpponentModel): void {
-    const heroKey = s.heroKey ? model.resolve(s.heroKey) : undefined;
+    const heroKey = s.heroKey ? model.resolve(s.heroKey, s.players.find((p) => p.key === s.heroKey)?.name) : undefined;
     const keys: string[] = [];
-    const add = (k: string) => {
-      const r = model.resolve(k);
+    const add = (k: string, name?: string) => {
+      const r = model.resolve(k, name);
       if (r !== heroKey && !keys.includes(r)) keys.push(r);
     };
-    for (const p of s.players) if (p.seat !== s.heroSeat) add(p.key);
+    for (const p of s.players) if (p.seat !== s.heroSeat) add(p.key, p.name);
     for (const p of model.players.values()) add(p.key);
     const rows: Array<[string, StatName]> = [
       ["VPIP", "vpip"],
@@ -243,9 +262,17 @@ export class Overlay {
       return;
     }
     const profiles = keys.map((k) => model.profile(k, s.players.find((p) => p.key === k)?.name ?? k));
-    const aka = (k: string) => model.players.get(k)?.aliasNames?.filter(Boolean) ?? [];
+    const allNames = (k: string) => {
+      const p = model.players.get(k);
+      return p ? [...new Set([p.name, ...(p.aliasNames ?? [])])].filter((n) => n && n !== p.label) : [];
+    };
+    // With a person name set, list every in-game name; otherwise the old ones only.
+    const aka = (k: string) => {
+      const p = model.players.get(k);
+      return allNames(k).filter((n) => p?.label || n !== p?.name);
+    };
     let html = `<div class="scroll"><table><tr><th></th>${profiles
-      .map((p) => `<th>${esc(p.name)}${aka(p.key).length ? `<br><span class="muted">aka ${esc(aka(p.key).join(", "))}</span>` : ""}</th>`)
+      .map((p) => `<th>${esc(p.name)}${aka(p.key).length ? `<br><span class="muted">${model.players.get(p.key)?.label ? "plays as" : "aka"} ${esc(aka(p.key).join(", "))}</span>` : ""}</th>`)
       .join("")}</tr>`;
     html += `<tr><td>Hands</td>${profiles.map((p) => `<td>${p.hands}</td>`).join("")}</tr>`;
     for (const [label, stat] of rows)
@@ -263,8 +290,14 @@ export class Overlay {
           .map((o) => `<option value="${esc(o.key)}">${esc(o.name)}</option>`)
           .join("")}</select></td>`,
       )
+      .join("")}</tr>`;
+    html += `<tr><td>Person</td>${profiles
+      .map((p) => {
+        const st = model.players.get(p.key);
+        return `<td><button class="btn" data-act="edit" data-key="${esc(p.key)}" data-name="${esc(st?.name ?? p.name)}" data-label="${esc(st?.label ?? "")}" data-names="${esc(allNames(p.key).join("|"))}">Edit</button></td>`;
+      })
       .join("")}</tr></table></div>`;
-    html += `<div class="muted">* fewer than 5 samples: mostly the default assumption. Profiles follow each account, so a new name on the same account is recognised automatically; use "Same person as…" when a mate plays from a different account or device.</div>`;
+    html += `<div class="muted">* fewer than 5 samples: mostly the default assumption. A guest who plays under a name already linked to someone is counted as that person automatically. Use <b>Edit</b> to give someone a name (e.g. Isaiah) and list the names they play under, or "Same person as…" to combine two columns.</div>`;
     this.pane("players").innerHTML = html;
   }
 

@@ -514,6 +514,7 @@
     bluffShare: [0.3, 6]
   };
   var POSTFLOP = ["flop", "turn", "river"];
+  var norm = (n) => n.trim().toLowerCase();
   var OpponentModel = class _OpponentModel {
     players = /* @__PURE__ */ new Map();
     /** Merged accounts: alias key → the profile it now feeds. */
@@ -529,11 +530,61 @@
     toJSON() {
       return { players: [...this.players.values()], aliases: Object.fromEntries(this.aliases) };
     }
-    /** The profile key a player's hands are recorded under (follows merges). */
-    resolve(key) {
+    /**
+     * The profile key a player's hands are recorded under. Follows merges, and
+     * (because guests get a fresh account whenever they like) links an unknown
+     * account to an existing profile that has played under the same name.
+     */
+    resolve(key, name) {
       let k = key;
       for (let i = 0; i < 10 && this.aliases.has(k); i++) k = this.aliases.get(k);
+      if (this.players.has(k) || !name) return k;
+      const owner = this.findByName(name);
+      if (owner && owner !== k) {
+        this.aliases.set(k, owner);
+        return owner;
+      }
       return k;
+    }
+    /** Profile that uses this name (person name, current name or a known alias), case-insensitive. */
+    findByName(name) {
+      const n = norm(name);
+      if (!n) return void 0;
+      for (const p of this.players.values())
+        if (norm(p.label ?? "") === n || norm(p.name) === n || p.aliasNames?.some((a) => norm(a) === n)) return p.key;
+      return void 0;
+    }
+    /** Display name: your label for the person if set, else their latest in-game name. */
+    displayName(key) {
+      const p = this.players.get(this.resolve(key));
+      return p?.label || p?.name || key;
+    }
+    /** Name a person (e.g. "Isaiah"). Also merges any other profile already using that name. */
+    setLabel(key, label) {
+      const k = this.resolve(key);
+      const p = this.players.get(k);
+      if (!p) return;
+      const clean = label.trim();
+      p.label = clean || void 0;
+      if (clean) this.addName(k, clean);
+    }
+    /** Tie another in-game name to this person: past profiles with it merge in, future accounts with it join automatically. */
+    addName(key, name) {
+      const k = this.resolve(key);
+      const p = this.players.get(k);
+      const clean = name.trim();
+      if (!p || !clean) return;
+      for (const other of [...this.players.values()])
+        if (other.key !== k && (norm(other.name) === norm(clean) || norm(other.label ?? "") === norm(clean) || other.aliasNames?.some((a) => norm(a) === norm(clean))))
+          this.merge(other.key, k);
+      if (norm(p.name) !== norm(clean) && !p.aliasNames?.some((a) => norm(a) === norm(clean))) p.aliasNames = [...p.aliasNames ?? [], clean];
+    }
+    /** Stop treating a name as this person (e.g. two mates both used "Test" once). Past stats stay. */
+    removeName(key, name) {
+      const p = this.players.get(this.resolve(key));
+      if (!p) return;
+      p.aliasNames = p.aliasNames?.filter((a) => norm(a) !== norm(name));
+      if (norm(p.name) === norm(name)) p.name = p.label || p.aliasNames?.[0] || p.name;
     }
     /**
      * Merge `fromKey`'s history into `intoKey` (same mate, different account or
@@ -575,7 +626,7 @@
       if (hit) c[0]++;
     }
     profile(key, name = key) {
-      key = this.resolve(key);
+      key = this.resolve(key, name);
       const s = this.players.get(key) ?? { key, name, hands: 0, counts: {} };
       const stat = (n) => {
         const [mean, k] = PRIORS[n];
@@ -597,7 +648,7 @@
       }
       return {
         key,
-        name: s.name ?? name,
+        name: s.label || s.name || name,
         hands: s.hands,
         stat,
         raw: (n) => s.counts[n] ?? [0, 0],
@@ -606,8 +657,8 @@
       };
     }
     resolveHistory(h) {
-      if (!this.aliases.size) return h;
-      const r = (k) => this.resolve(k);
+      const names = new Map(h.players.map((p) => [p.key, p.name]));
+      const r = (k) => this.resolve(k, names.get(k));
       const remap = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [r(k), v]));
       return {
         ...h,
@@ -1265,6 +1316,7 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
         if (act === "min") this.panel.classList.toggle("min");
         if (act === "reset" && confirm("Reset the ledger for this lobby?")) this.actions.resetLedger();
         if (act === "capture") this.actions.saveCapture();
+        if (act === "edit") this.editPerson(t.closest("[data-act]"));
       });
       this.root.addEventListener("change", (e) => {
         const t = e.target;
@@ -1289,6 +1341,22 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
     advice = null;
     thinking = false;
     useReads = true;
+    editPerson(el) {
+      const key = el.dataset.key;
+      const current = el.dataset.label ?? "";
+      const names = (el.dataset.names ?? "").split("|").filter(Boolean);
+      const label = prompt("Who is this? (e.g. Isaiah)", current || el.dataset.name || "");
+      if (label === null) return;
+      const list = prompt(
+        `Names ${label || "they"} plays under, comma separated.
+Any guest using one of these names is counted as ${label || "this person"}.`,
+        names.join(", ")
+      );
+      if (list === null) return;
+      const next = list.split(",").map((n) => n.trim()).filter(Boolean);
+      const removed = names.filter((n) => !next.some((m) => m.toLowerCase() === n.toLowerCase()));
+      this.actions.editPerson(key, label, next, removed);
+    }
     makeDraggable() {
       const head = this.root.querySelector(".head");
       let dx = 0;
@@ -1363,13 +1431,13 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
       this.pane("advice").innerHTML = html;
     }
     renderPlayers(s, model2) {
-      const heroKey = s.heroKey ? model2.resolve(s.heroKey) : void 0;
+      const heroKey = s.heroKey ? model2.resolve(s.heroKey, s.players.find((p) => p.key === s.heroKey)?.name) : void 0;
       const keys = [];
-      const add = (k) => {
-        const r = model2.resolve(k);
+      const add = (k, name) => {
+        const r = model2.resolve(k, name);
         if (r !== heroKey && !keys.includes(r)) keys.push(r);
       };
-      for (const p of s.players) if (p.seat !== s.heroSeat) add(p.key);
+      for (const p of s.players) if (p.seat !== s.heroSeat) add(p.key, p.name);
       for (const p of model2.players.values()) add(p.key);
       const rows = [
         ["VPIP", "vpip"],
@@ -1391,8 +1459,15 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
         return;
       }
       const profiles = keys.map((k) => model2.profile(k, s.players.find((p) => p.key === k)?.name ?? k));
-      const aka = (k) => model2.players.get(k)?.aliasNames?.filter(Boolean) ?? [];
-      let html = `<div class="scroll"><table><tr><th></th>${profiles.map((p) => `<th>${esc(p.name)}${aka(p.key).length ? `<br><span class="muted">aka ${esc(aka(p.key).join(", "))}</span>` : ""}</th>`).join("")}</tr>`;
+      const allNames = (k) => {
+        const p = model2.players.get(k);
+        return p ? [.../* @__PURE__ */ new Set([p.name, ...p.aliasNames ?? []])].filter((n) => n && n !== p.label) : [];
+      };
+      const aka = (k) => {
+        const p = model2.players.get(k);
+        return allNames(k).filter((n) => p?.label || n !== p?.name);
+      };
+      let html = `<div class="scroll"><table><tr><th></th>${profiles.map((p) => `<th>${esc(p.name)}${aka(p.key).length ? `<br><span class="muted">${model2.players.get(p.key)?.label ? "plays as" : "aka"} ${esc(aka(p.key).join(", "))}</span>` : ""}</th>`).join("")}</tr>`;
       html += `<tr><td>Hands</td>${profiles.map((p) => `<td>${p.hands}</td>`).join("")}</tr>`;
       for (const [label, stat] of rows)
         html += `<tr><td>${label}</td>${profiles.map((p) => {
@@ -1402,8 +1477,12 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
       html += `<tr><td>Style</td>${profiles.map((p) => `<td>${esc(p.style.split(" (")[0])}</td>`).join("")}</tr>`;
       html += `<tr><td>Same person as\u2026</td>${profiles.map(
         (p) => `<td><select data-act="merge" data-key="${esc(p.key)}" data-name="${esc(p.name)}"><option value="">\u2013</option>${profiles.filter((o) => o.key !== p.key).map((o) => `<option value="${esc(o.key)}">${esc(o.name)}</option>`).join("")}</select></td>`
-      ).join("")}</tr></table></div>`;
-      html += `<div class="muted">* fewer than 5 samples: mostly the default assumption. Profiles follow each account, so a new name on the same account is recognised automatically; use "Same person as\u2026" when a mate plays from a different account or device.</div>`;
+      ).join("")}</tr>`;
+      html += `<tr><td>Person</td>${profiles.map((p) => {
+        const st = model2.players.get(p.key);
+        return `<td><button class="btn" data-act="edit" data-key="${esc(p.key)}" data-name="${esc(st?.name ?? p.name)}" data-label="${esc(st?.label ?? "")}" data-names="${esc(allNames(p.key).join("|"))}">Edit</button></td>`;
+      }).join("")}</tr></table></div>`;
+      html += `<div class="muted">* fewer than 5 samples: mostly the default assumption. A guest who plays under a name already linked to someone is counted as that person automatically. Use <b>Edit</b> to give someone a name (e.g. Isaiah) and list the names they play under, or "Same person as\u2026" to combine two columns.</div>`;
       this.pane("players").innerHTML = html;
     }
     renderLedger(rows) {
@@ -2049,6 +2128,14 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
       overlay.setUseReads(on);
       storage?.set({ [SETTINGS_KEY]: { useReads } });
       recomputeAdvice();
+    },
+    editPerson(key, label, names, removed) {
+      for (const n of removed) model.removeName(key, n);
+      for (const n of names) model.addName(key, n);
+      model.setLabel(key, label);
+      saveModel();
+      recomputeAdvice();
+      render();
     },
     merge(fromKey, intoKey) {
       model.merge(fromKey, intoKey);
