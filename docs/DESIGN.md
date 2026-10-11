@@ -133,10 +133,18 @@ Then pick one of two approaches:
   (`PlayOrigin:Iframe:pokerpatio.com`).
 - The capture used the Fetch/XHR filter, which hides WebSocket traffic.
   Bot games may also run entirely in the browser with no server traffic.
-- **Still needed:** a capture from a real **private lobby** with the **WS**
-  filter (or "All"), where you click the socket and open its **Messages** tab
-  through a few hands. The player confirms the WebSocket streams the full
-  event feed in multiplayer games.
+- A second capture (screenshot, "All" filter) showed only 9 GameAnalytics
+  requests, all `(blocked)` by an ad or privacy blocker. Because there were
+  no page, script or socket requests at all, recording started after the
+  page loaded. **Chrome only lists connections opened while DevTools is open**,
+  so the game's socket wasn't captured.
+- Public sources (site pages, AlternativeTo, MalwareTips, search) don't
+  describe the transport or name the developer. Only a capture will show it.
+- **Still needed:** open DevTools *before* loading the lobby (or reload with
+  it open), use the **Socket** filter (newer Chrome's name for "WS"), click
+  the connection and open its **Messages** tab for a few hands. If nothing
+  appears under Socket, check **All** for `eventsource`, long-polling
+  (`socket.io/?EIO=`, Firebase `.lp?`) or WebRTC.
 - Telemetry is a backup signal at best. Never rely on it for game state.
 
 Either way the Adapter outputs neutral events (`HandStarted`, `HoleCards`,
@@ -273,7 +281,16 @@ Tooling: TypeScript, Vite (extension build), Vitest (tests).
 - All three players agreed to use helper tools.
 - Browser: Chrome (the HAR came from Chrome on Windows).
 
+- **It's a cash game.** Players re-buy when they bust and settle up at the end
+  (net = cash-outs + final stack − buy-ins). Players often cash out down to
+  $500 once they reach about $1,000, so effective stacks usually sit between
+  33 and 67 BB. The bot maximises **chip EV**, the average number of chips
+  each decision wins or loses. Survival doesn't matter and there's no
+  tournament maths, but decisions use the **effective stack** (the smaller
+  of the stacks involved).
+- **Extra feature:** a session ledger that tracks buy-ins, cash-outs and
+  net result per player.
+
 **Open**
 - WebSocket message format: needs a private-lobby WS capture (§4).
-- Re-buys or a fixed buy-in? This affects whether to play for chip EV or
-  survival.
+- (none beyond the capture)
