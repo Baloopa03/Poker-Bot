@@ -124,6 +124,21 @@ Then pick one of two approaches:
 - **B. DOM scraping (fallback).** Use a `MutationObserver` on the table element
   and parse cards, pot, stacks and the action log from the HTML.
 
+**Recon so far (bot-lobby HAR, 2026-10-11):**
+- The HAR contained only GameAnalytics telemetry (`api.gameanalytics.com`),
+  with no game-state traffic. It recorded UI events such as
+  `UIAction:call`, `UIAction:check`, `Start:Game:HandStarted` and
+  `Complete:PlayerMadeBet` (score = chips bet), but no cards, board or pot.
+- The game client is build `0.9.2.25`, loaded in an iframe
+  (`PlayOrigin:Iframe:pokerpatio.com`).
+- The capture used the Fetch/XHR filter, which hides WebSocket traffic.
+  Bot games may also run entirely in the browser with no server traffic.
+- **Still needed:** a capture from a real **private lobby** with the **WS**
+  filter (or "All"), where you click the socket and open its **Messages** tab
+  through a few hands. The player confirms the WebSocket streams the full
+  event feed in multiplayer games.
+- Telemetry is a backup signal at best. Never rely on it for game state.
+
 Either way the Adapter outputs neutral events (`HandStarted`, `HoleCards`,
 `PlayerAction`, `BoardDealt`, `Showdown`, `HandEnded`) and the rest of the
 bot never touches pokerpatio code.
@@ -142,6 +157,11 @@ bot never touches pokerpatio code.
 - Separate charts for open, call vs open, 3-bet and push/fold when short-stacked
   (under about 12 BB).
 - Exploit adjustments widen or tighten these based on opponent stats (§6).
+- **Our usual game:** 8/15 blinds, $500 starting stacks, so we start about
+  **33 BB deep**. That's shallow: stack-to-pot ratios are low and all-in
+  decisions come up often, so push/fold and commitment logic matter more
+  than deep-stack play. Blinds and stacks can change, so the engine works
+  in big blinds read from the live state, never in hard-coded dollar amounts.
 
 ### 5.3 Postflop
 For each legal option (fold, check/call, bet or raise at a few sizes such as
@@ -244,9 +264,16 @@ Tooling: TypeScript, Vite (extension build), Vitest (tests).
 | **M4** | **Opponent model** | Stats persist across sessions, ranges narrow, exploit-based EV |
 | **M5** | **Simulator + tuning** | The bot beats scripted opponents in the sim, and we tune it from real hand reviews |
 
-## 11. Open questions
+## 11. Decisions and open questions
 
-- Game format: always NLHE? Typical blinds and starting stacks (in big blinds)? Do you re-buy?
-- Does pokerpatio show a hand-history or action log on screen? It makes DOM scraping easier.
-- Does pokerpatio's terms of service say anything about helper tools? Check before M2.
-- Browser: Chrome/Edge only, or Firefox too?
+**Decided**
+- Format: No-Limit Hold'em, 3 players, usually 8/15 blinds with $500 stacks
+  (blinds and stacks occasionally change).
+- Data source: WebSocket feed (the player confirmed it streams real-time events).
+- All three players agreed to use helper tools.
+- Browser: Chrome (the HAR came from Chrome on Windows).
+
+**Open**
+- WebSocket message format: needs a private-lobby WS capture (§4).
+- Re-buys or a fixed buy-in? This affects whether to play for chip EV or
+  survival.
