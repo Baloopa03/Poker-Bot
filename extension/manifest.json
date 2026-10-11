@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Poker Bot (advisor)",
+  "version": "0.1.0",
+  "description": "Reads your pokerpatio table and suggests plays. Never clicks or acts for you.",
+  "permissions": [
+    "storage"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://pokerpatio.com/*",
+        "https://*.pokerpatio.com/*"
+      ],
+      "js": [
+        "page.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://pokerpatio.com/*",
+        "https://*.pokerpatio.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}

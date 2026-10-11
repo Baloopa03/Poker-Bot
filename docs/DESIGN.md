@@ -4,6 +4,29 @@ An **advisor** for our private 3-player No-Limit Hold'em games on pokerpatio.com
 It reads the table from the browser, works out the best play, and shows it in an
 overlay. **It never clicks anything; you make every decision.**
 
+## Status (2026-10-11)
+
+| Milestone | State |
+|---|---|
+| M0 Recon | ✅ socket.io protocol documented (PROTOCOL.md), two captures saved as fixtures |
+| M1 Engine core | ✅ evaluator (checked against all 2,598,960 five-card hands), Monte Carlo + exact river equity, ranges |
+| M2 Adapter + Tracker | ✅ table state, hand histories and ledger. Every pot matches the server in both captures, and it works without admin events |
+| M3 Overlay + advice | ✅ MV3 extension in `extension/`, with Advice / Players / Ledger tabs, tested end to end in Chromium against a replayed capture |
+| M4 Opponent model | ✅ per-account stats with priors, Bayesian range narrowing, exploit-driven fold equity |
+| M5 Simulator + tuning | ⏳ next: self-play simulator vs scripted opponent styles, then tuning from real sessions |
+
+**Implementation notes, where the code differs from the plan above:**
+- Preflop is decided by the same EV engine as postflop (fold equity from
+  fold-to-steal / fold-to-3-bet, equity vs estimated ranges, realisation
+  factors by position), not by fixed charts. Hand rankings come from a
+  precomputed equity table (`src/engine/preflop-equity.json`).
+- Opponents continue against bets by a mix of frequency (their stats) and
+  absolute hand strength (people don't fold top pair to a small bet), and the
+  advisor applies a mild risk penalty so near-ties go to the smaller, more
+  robust size.
+- All work runs in the content script (about 10–150 ms per decision). No
+  worker or background page is needed.
+
 ## 1. Goals and non-goals
 
 **Goals**

@@ -153,6 +153,23 @@ export class Tracker {
     row.stack = total;
   }
 
+  /** Room id from our own `room:join`, used to keep a ledger per lobby. */
+  roomId: string | undefined;
+
+  /** Full ledger rows (including expected stacks) so a reload can carry on. */
+  exportLedger(): Array<LedgerEntry & { expected?: number }> {
+    return [...this.ledgerRows.values()].map((r) => ({ ...r }));
+  }
+
+  restoreLedger(rows: Array<LedgerEntry & { expected?: number }>): void {
+    for (const r of rows) if (r?.key) this.ledgerRows.set(r.key, { ...r });
+  }
+
+  resetLedger(): void {
+    this.ledgerRows.clear();
+    for (const p of this.state.players) this.reconcile(p);
+  }
+
   ledger(): LedgerEntry[] {
     for (const p of this.state.players) {
       const row = this.ledgerRows.get(p.key);
@@ -167,6 +184,7 @@ export class Tracker {
     if (p.dir === "out") {
       if (p.ack !== undefined && p.event) this.pendingAcks.set(p.ack, p.event);
       if (p.event === "player:game:perform_action") this.setHero((p.args?.[0] as Any)?.playerPos);
+      if (p.event === "room:join") this.roomId = (p.args?.[0] as Any)?.roomId ?? this.roomId;
       return;
     }
     if (p.dir !== "in") return;
