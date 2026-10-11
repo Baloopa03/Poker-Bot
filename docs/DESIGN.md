@@ -308,9 +308,10 @@ Tooling: TypeScript, Vite (extension build), Vitest (tests).
   tournament maths, but decisions use the **effective stack** (the smaller
   of the stacks involved).
 - **Extra feature:** a session ledger that tracks buy-ins, cash-outs and
-  net result per player.
+  net result per player. It's built from seat approvals (buy-ins) and admin
+  stack edits (cash-outs), keyed on `userId` because re-buys change seat and
+  in-game id.
 
 **Open**
-- WebSocket message format: done for heads-up (see PROTOCOL.md). A 3-player
-  capture with a re-buy is still wanted.
+- (none: the 3-handed, re-buy and cash-out capture is in; see PROTOCOL.md)
 - (none beyond the capture)

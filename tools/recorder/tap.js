@@ -5,7 +5,8 @@
   "use strict";
 
   const MAX_ENTRIES = 50000;
-  const SENSITIVE_KEY = /token|auth|pass|secret|cookie|session|jwt|email|^sid$/i;
+  // authUserId/playersPlayingAuthIds are public account ids (also sent as `userId`) and are needed to follow a player across re-buys.
+  const SENSITIVE_KEY = /token|^auth$|authorization|pass|secret|cookie|session|jwt|email|^sid$/i;
 
   // Engine.IO v4 packet types (first char of every frame).
   const EIO = { 0: "open", 1: "close", 2: "ping", 3: "pong", 4: "message", 5: "upgrade", 6: "noop" };
@@ -101,7 +102,7 @@
   // ---- Live recording (browser only) ----
 
   const started = Date.now();
-  const log = { recorder: "0.1.0", page: location.origin + location.pathname, startedAt: new Date(started).toISOString(), entries: [] };
+  const log = { recorder: "0.1.1", page: location.origin + location.pathname, startedAt: new Date(started).toISOString(), entries: [] };
   let button = null;
 
   function push(entry) {

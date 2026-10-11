@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Poker Bot Recorder",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Records pokerpatio.com socket.io game messages so they can be saved as a capture file.",
   "content_scripts": [
     {

@@ -1,8 +1,11 @@
 # pokerpatio socket protocol (reverse-engineered)
 
-Source: `tests/fixtures/pokerpatio/heads-up-5-hands.json`, a recorder capture
-from a private heads-up lobby on 2026-10-11 (game version `0.9.2.24`, blinds
-5/10). This is our best reading of a protocol nobody has documented. Confirm it
+Sources (recorder captures from a private lobby, 2026-10-11, game version `0.9.2.24`):
+- `tests/fixtures/pokerpatio/heads-up-5-hands.json`: heads-up, blinds 5/10.
+- `tests/fixtures/pokerpatio/3-handed-rebuy-cashout.json`: 3-handed, a blind
+  change to 8/15, two busts and re-buys, and a cash-out.
+
+The protocol isn't publicly documented. This is our best reading of it. This is our best reading of a protocol nobody has documented. Confirm it
 against new captures.
 
 ## Connection
@@ -89,10 +92,80 @@ before showdown, and folded or mucked hands were never revealed. The Adapter
 must still only use: the hero's cards, board cards, and cards flipped during
 `showdown`. Debug flags or any other leak must be ignored.
 
-## Not seen yet (needs a 3-player capture)
+## Positions (3-handed, confirmed)
 
-- Three-handed positions (BTN / SB / BB). Heads-up, the dealer is also the SB.
-- Re-buys and top-ups (where the stack increases between hands).
-- Multi-way side pots, split pots, timeouts (`wasServerAutoAction: true`),
-  sitting out, voluntarily showing cards.
-- A blind change in the middle of a session.
+`game:dealer_updated` names every role directly: `dealerSeatPos` (BTN),
+`smallBlindSeatPos`, `bigBlindSeatPos`. Three-handed, `underTheGunSeatPos` is
+the BTN, who acts first preflop. Heads-up, the dealer is also the SB. Never
+work positions out from seat numbers. Use this event.
+
+## Identity: seat vs in-game id vs account
+
+**A re-buy gives a player a new seat *and* a new in-game `playerID`.** In the
+capture, Test2 was `id 3 @ s6`, busted, re-joined, and became `id 2 @ s2_v2`.
+The only stable key is the account `userId` (also sent as `authUserId`).
+Opponent stats must be keyed on `userId`, and resolved from `id`/`posType` via
+the latest `room:lobby_stats_updated.playerStates` or
+`seat_request_approved`. Display names also work as a fallback.
+
+## Blinds changing
+
+1. Admin sends `admin:room:update_game_settings` → server emits
+   `admin:room:settings_updated` (full `settings`) and a chat log `e: "sc"`.
+2. Takes effect at the next `admin:game:new_hand_started`
+   (`gameSettings.small_blind/big_blind` = 8/15).
+
+## Busting and re-buying
+
+1. A player loses all chips → `player_play_state_changed: "bankrupted"`.
+2. Too few players left → `admin:game:game_stopped
+   {stopReason: "not_enough_playable_players"}`.
+3. `player:game:was_unseated {userId, reason: "was_bankrupt"}` + chat `e: "ls"`.
+4. Re-buy = ask for a seat again: `player:room:new_seat_request {playerState}`
+   → admin approves → `admin:room:seat_request_approved
+   {userId, seatPos, stack: 500}` + chat `e: "sap"`.
+5. Admin presses start → `admin:game:game_started` and a new hand.
+
+**Ledger:** each `seat_request_approved` (and the first seating) is a
+**buy-in** of `stack`.
+
+## Cash-outs and top-ups (admin stack edit)
+
+The "cash out down to 500" is done by the admin editing a stack, here while
+the game was paused mid-hand:
+- `admin:game:game_paused` / `admin:game:game_unpaused {turnTimeLeft…}`
+- `admin:room:player_edited {userId, stack: 530}` + chat `e: "pss"
+  {amt: 530, ostk: 1530}` (new and old stack).
+- `stack` is the chips **behind**. In the capture the hero had posted the
+  15 BB, so 1530 behind → 530 behind = **cash-out of 1000**.
+
+**Ledger:** `ostk − amt` > 0 is a cash-out; < 0 is a top-up (extra buy-in).
+Net result = cash-outs + current stack − buy-ins.
+
+## Multi-way all-in and side pots (checked)
+
+Hand 3 of the 3-handed capture: Test2 shoves 925, Jack calls 267 (all-in),
+Test calls 285 (all-in). That's 1500 in total. The uncalled 625 is refunded,
+giving `hei.tp` **875**. Main pot 825 (3 × 275) goes to Jack, and side pot
+#1 of 50 (2 × 25) goes to Test (`isp: true`, `wmpf: " side pot #1 "`). Our
+pot maths matches the server.
+
+When everyone is all-in, the remaining streets are dealt straight away with no
+`player_turn_started`, then all live hands are revealed at `showdown`.
+
+## Extra game-log codes
+
+| `e` | Meaning | Fields |
+|---|---|---|
+| `sc` | Setting changed | `set`, `old`, `new` |
+| `pss` | Admin set a player's stack | `pid`, `amt` (new), `ostk` (old) |
+| `ls` | Player left their seat | `pid`, `rsn` (`was_bankrupt`) |
+| `sap` | Seat approved | `pid`, `st` (seat) |
+| `pcl` | Player joined the lobby | `pid` |
+
+## Not seen yet
+
+- Timeouts (`wasServerAutoAction: true`), sitting out, voluntarily showing
+  cards, split pots, a player leaving mid-hand.
+- Note: in both captures the recorder (v0.1.0) redacted `authUserId`. From
+  v0.1.1 it keeps it.
