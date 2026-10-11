@@ -116,3 +116,33 @@ describe("tracker: 3-handed capture with re-buys and a cash-out", () => {
     expect(facingShove).toMatchObject({ street: "turn", pot: 485, board: "3s 6h Ts 9d" });
   });
 });
+
+describe("tracker: cards shown after the hand", () => {
+  it("records a voluntary show after an uncontested pot and feeds the opponent model", async () => {
+    const { OpponentModel } = await import("../src/opponents/model");
+    const capture = JSON.parse(readFileSync("tests/fixtures/pokerpatio/heads-up-5-hands.json", "utf8"));
+    const entries = capture.entries as any[];
+    const end = entries.findIndex((e) => e.event === "game:game_ended");
+    const dealt = entries.find((e) => e.event === "game:cards_dealt_to_player").args[0];
+    const testIds = dealt.filter((d: any) => d.playerPos === "s2_v2").map((d: any) => d.cardData.uniqueID);
+    // Test bet the river and Jack folded; now Test shows 7h 2c (a bluff).
+    const show = [
+      { dir: "in", event: "game:update_card_data", args: [{ cardData: { uniqueID: testIds[0], suite: "hearts", value: "7" }, flipCard: true }] },
+      { dir: "in", event: "game:update_card_data", args: [{ cardData: { uniqueID: testIds[1], suite: "clubs", value: "3" }, flipCard: true }] },
+    ];
+    const t = new Tracker();
+    const m = new OpponentModel();
+    const shown: string[] = [];
+    t.on("handComplete", (h) => m.update(h));
+    t.on("handShown", ({ history, key }) => {
+      shown.push(cardsToString(history.result!.shown[key]));
+      m.learnShown(history, key);
+    });
+    for (const e of [...entries.slice(0, end + 1), ...show]) t.handle(e);
+    expect(shown).toEqual(["7h 3c"]);
+    expect(t.state.heroCards.map((c) => c)).not.toContain(undefined);
+    const test = [...m.players.values()].find((p) => p.name === "Test")!;
+    // Two bets that hand (flop raise, river bet): the river one was a pure bluff.
+    expect(test.counts.bluffShare).toEqual([1, 2]);
+  });
+});

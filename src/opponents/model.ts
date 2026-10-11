@@ -338,17 +338,27 @@ export class OpponentModel {
     }
 
     // Bluff evidence: how strong were shown hands when they bet or raised?
-    for (const [key, cards] of Object.entries(shown)) {
-      const s = stats.get(key);
-      if (!s || cards.length !== 2) continue;
-      for (const street of POSTFLOP) {
-        const bets = h.actions.filter((a) => a.key === key && a.street === street && (a.type === "bet" || a.type === "raise"));
-        if (!bets.length) continue;
-        const board = h.board.slice(0, street === "flop" ? 3 : street === "turn" ? 4 : 5);
-        if (board.length < 3) continue;
-        const strength = handStrength(cards as [Card, Card], board);
-        for (let i = 0; i < bets.length; i++) this.bump(s, "bluffShare", strength < 0.45);
-      }
+    for (const [key, cards] of Object.entries(shown)) this.bluffEvidence(h, key, cards);
+  }
+
+  /** Learn from cards a player showed after the hand (folded or uncontested). */
+  learnShown(hand: HandHistory, key: string): void {
+    const h = this.resolveHistory(hand);
+    const k = this.resolve(key, hand.players.find((p) => p.key === key)?.name);
+    const cards = h.result?.shown[k];
+    if (cards) this.bluffEvidence(h, k, cards);
+  }
+
+  private bluffEvidence(h: HandHistory, key: string, cards: readonly Card[]): void {
+    const s = this.players.get(key);
+    if (!s || cards.length !== 2) return;
+    for (const street of POSTFLOP) {
+      const bets = h.actions.filter((a) => a.key === key && a.street === street && (a.type === "bet" || a.type === "raise"));
+      if (!bets.length) continue;
+      const board = h.board.slice(0, street === "flop" ? 3 : street === "turn" ? 4 : 5);
+      if (board.length < 3) continue;
+      const strength = handStrength(cards as [Card, Card], board);
+      for (let i = 0; i < bets.length; i++) this.bump(s, "bluffShare", strength < 0.45);
     }
   }
 }

@@ -126,6 +126,11 @@ tracker.on("handComplete", (h) => {
   saveLedger();
 });
 
+tracker.on("handShown", ({ history, key }) => {
+  model.learnShown(history, key);
+  saveModel();
+});
+
 tracker.on("update", () => render());
 
 window.addEventListener("message", (e) => {

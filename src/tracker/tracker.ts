@@ -39,6 +39,8 @@ export interface TrackerEvents {
   update: (s: TableState) => void;
   heroTurn: (s: TableState) => void;
   handComplete: (h: HandHistory) => void;
+  /** Someone showed their cards after the hand finished. */
+  handShown: (e: { history: HandHistory; key: string }) => void;
 }
 
 export class Tracker {
@@ -73,7 +75,9 @@ export class Tracker {
     update: [],
     heroTurn: [],
     handComplete: [],
+    handShown: [],
   };
+  private lastHistory: HandHistory | undefined;
 
   on<K extends keyof TrackerEvents>(event: K, fn: TrackerEvents[K]): void {
     this.listeners[event].push(fn);
@@ -482,6 +486,13 @@ export class Tracker {
       }
       p.stack = ps.stack;
       if (ps.playState) this.playState.set(key, ps.playState);
+      if (ps.revealedCardsToAll && Array.isArray(ps.cards) && p.cards.length < 2) {
+        for (const cd of ps.cards) {
+          const c = this.siteCard(cd?.cardData ?? cd);
+          if (c !== undefined && !p.cards.includes(c)) p.cards.push(c);
+        }
+        this.maybeLateShow(p);
+      }
       if (!s.handActive) {
         p.committedHand = 0;
         p.committedStreet = 0;
@@ -624,8 +635,8 @@ export class Tracker {
     const card = this.siteCard(cd);
     if (!seat || card === undefined) return;
     const p = this.playerBySeat(seat);
-    // Before showdown the server only reveals our own cards.
-    if (s.street !== "showdown") {
+    // During a hand, before showdown, the server only reveals our own cards.
+    if (s.handActive && s.street !== "showdown") {
       if (!s.heroSeat) this.setHero(seat);
       if (seat === s.heroSeat && !this.heroCardIds.has(uid)) {
         this.heroCardIds.add(uid);
@@ -635,7 +646,17 @@ export class Tracker {
     if (p && !this.seenCardIds.has(uid)) {
       this.seenCardIds.add(uid);
       p.cards.push(card);
+      this.maybeLateShow(p);
     }
+  }
+
+  /** A player chose to show their hand after it ended (e.g. after folding or winning uncontested). */
+  private maybeLateShow(p: PlayerState): void {
+    const h = this.lastHistory;
+    if (this.state.handActive || !h?.result || p.seat === this.state.heroSeat || p.cards.length !== 2) return;
+    if (h.result.shown[p.key]) return;
+    h.result.shown[p.key] = p.cards.slice();
+    this.emit("handShown", { history: h, key: p.key });
   }
 
   private handEnded(a: Any): void {
@@ -688,6 +709,7 @@ export class Tracker {
     s.toActSeat = undefined;
     s.currentBet = 0;
     this.recomputePot();
+    this.lastHistory = history;
     this.emit("handComplete", history);
     this.emit("update", s);
   }
