@@ -46,6 +46,12 @@ tr.best td { color: #81c995; font-weight: 700; }
 .row { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
 .toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #9aa0a6; margin-bottom: 8px; cursor: pointer; }
 .scroll { overflow-x: auto; }
+.hint { font-size: 12px; font-weight: 500; opacity: .85; margin-top: 2px; }
+.hint b { font-weight: 800; }
+details.more { margin-top: 4px; }
+details.more summary { cursor: pointer; color: #8ab4f8; font-size: 12px; margin-bottom: 4px; }
+.btn.danger { color: #f28b82; }
+.head .btn { padding: 2px 7px; }
 .addrow { display: flex; gap: 6px; margin-bottom: 8px; }
 .addrow input { flex: 1; background: #24272e; color: #e8eaed; border: 1px solid #3a3f4b; border-radius: 6px; padding: 4px 8px; font: inherit; }
 .sect { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #9aa0a6; margin: 10px 0 4px; }
@@ -88,6 +94,9 @@ export interface OverlayActions {
   removeName(personKey: string, name: string): void;
   renamePerson(personKey: string, label: string): void;
   forget(key: string): void;
+  exportData(): void;
+  importData(json: string): void;
+  forgetEveryone(): void;
 }
 
 export class Overlay {
@@ -97,6 +106,7 @@ export class Overlay {
   private advice: Advice | null = null;
   private thinking = false;
   private useReads = true;
+  private detailsOpen = false;
 
   constructor(private readonly actions: OverlayActions) {
     const host = document.createElement("div");
@@ -105,12 +115,14 @@ export class Overlay {
     this.root.innerHTML = `<style>${CSS}</style>
       <div class="panel">
         <div class="head"><span class="title">♠ Poker Bot</span><span class="status">waiting for game…</span>
+          <button class="btn" data-act="settings" title="Settings">⚙</button>
           <button class="btn" data-act="min" title="Minimise (Alt+B)">–</button></div>
         <div class="body">
           <div class="tabs"><div class="tab on" data-tab="advice">Advice</div><div class="tab" data-tab="players">Stats</div><div class="tab" data-tab="people">People</div><div class="tab" data-tab="ledger">Ledger</div></div>
           <div class="pane on" data-pane="advice"></div>
           <div class="pane" data-pane="players"></div>
           <div class="pane" data-pane="people"></div>
+          <div class="pane" data-pane="settings"></div>
           <div class="pane" data-pane="ledger"></div>
         </div>
       </div>`;
@@ -132,6 +144,17 @@ export class Overlay {
       if (act === "capture") this.actions.saveCapture();
       const el = t.closest<HTMLElement>("[data-act]");
       if (act === "add-person") this.addPerson();
+      if (act === "settings") {
+        if (this.tab === "settings") this.showTab(this.lastTab);
+        else {
+          this.renderSettings();
+          this.showTab("settings");
+        }
+      }
+      if (act === "close-settings") this.showTab(this.lastTab);
+      if (act === "export") this.actions.exportData();
+      if (act === "import") this.root.querySelector<HTMLInputElement>("#pb-import")?.click();
+      if (act === "reset-all" && confirm("Forget everything learned about every player? Make a backup first if you might want it back.")) this.actions.forgetEveryone();
       if (act === "remove-name") this.actions.removeName(el!.dataset.key!, el!.dataset.name!);
       if (act === "rename") {
         const label = prompt("Rename this person:", el!.dataset.label ?? "");
@@ -142,6 +165,10 @@ export class Overlay {
     this.root.addEventListener("change", (e) => {
       const t = e.target as HTMLInputElement | HTMLSelectElement;
       if (t.dataset.act === "reads") this.actions.setUseReads((t as HTMLInputElement).checked);
+      if (t.id === "pb-import") {
+        const file = (t as HTMLInputElement).files?.[0];
+        if (file) void file.text().then((txt) => this.actions.importData(txt));
+      }
       if (t.dataset.act === "assign" && t.value) {
         let person = t.value;
         if (person === "__new") {
@@ -195,7 +222,7 @@ export class Overlay {
     try {
       localStorage.setItem(
         "pokerbot:layout",
-        JSON.stringify({ left: this.panel.style.left, top: this.panel.style.top, min: this.panel.classList.contains("min"), tab: this.tab }),
+        JSON.stringify({ left: this.panel.style.left, top: this.panel.style.top, min: this.panel.classList.contains("min"), tab: this.lastTab, details: this.detailsOpen }),
       );
     } catch {
       /* storage blocked: layout just isn't remembered */
@@ -212,7 +239,8 @@ export class Overlay {
         this.panel.style.right = "auto";
       }
       if (l.min) this.panel.classList.add("min");
-      if (l.tab) this.showTab(l.tab);
+      if (l.tab && l.tab !== "settings") this.showTab(l.tab);
+      this.detailsOpen = !!l.details;
     } catch {
       /* ignore */
     }
@@ -251,7 +279,9 @@ export class Overlay {
     });
   }
 
+  private lastTab = "advice";
   private showTab(tab: string): void {
+    if (tab !== "settings") this.lastTab = tab;
     this.tab = tab;
     if (this.panel) this.saveLayout();
     this.root.querySelectorAll<HTMLElement>("[data-tab]").forEach((el) => el.classList.toggle("on", el.dataset.tab === tab));
@@ -293,8 +323,7 @@ export class Overlay {
     const hero = s.players.find((p) => p.seat === s.heroSeat);
     const heroTurn = !!hero && s.toActSeat === s.heroSeat;
     const a = heroTurn ? this.advice : null;
-    let html = `<label class="toggle" title="Off: ignore what's been learned about your mates and treat everyone as a typical player">
-      <input type="checkbox" data-act="reads" ${this.useReads ? "checked" : ""}> Use reads on mates</label>`;
+    let html = "";
     if (s.heroCards.length) html += `<div class="cards">${cardHtml(s.heroCards)}</div>`;
     html += `<div class="board">${s.board.length ? `Board ${cardHtml(s.board)}` : s.handActive ? "Preflop" : ""}${s.handActive ? ` · Pot ${s.pot}` : ""}</div>`;
 
@@ -303,13 +332,21 @@ export class Overlay {
     else if (!heroTurn) html += `<div class="rec wait">Waiting for your turn</div>`;
     else if (!a) html += `<div class="rec wait">${this.thinking ? "Thinking…" : "Your turn"}</div>`;
     else {
-      html += `<div class="rec ${a.best.action}">${esc(a.best.label)}</div>`;
+      const b = a.best;
+      // pokerpatio's raise box takes the amount on top of the current bet, not the total.
+      let hint = "";
+      if ((b.action === "bet" || b.action === "raise") && b.toTotal !== undefined)
+        hint = b.allIn ? "Use the all-in button" : `Enter <b>${b.toTotal - s.currentBet}</b> in the raise box`;
+      html += `<div class="rec ${b.action}">${esc(b.label)}${hint ? `<div class="hint">${hint}</div>` : ""}</div>`;
       html += `<div class="kpis">
         <div class="kpi"><b>${pct(a.equity)}</b><span>win chance</span></div>
         <div class="kpi"><b>${a.potOdds ? pct(a.potOdds) : "–"}</b><span>needed to call</span></div>
         <div class="kpi"><b>${a.toCall || 0}</b><span>to call</span></div></div>`;
-      html += `<ul>${a.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`;
-      html += `<table><tr><th>Option</th><th>EV (chips)</th></tr>${a.options
+      // The reasons that explain *this* choice; the full breakdown sits under Details.
+      const key = a.reasons.filter((r) => !r.startsWith("Expected ") && !r.startsWith("Win chance "));
+      html += `<ul>${key.slice(0, 3).map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`;
+      html += `<details class="more" ${this.detailsOpen ? "open" : ""}><summary>Details</summary>`;
+      html += `<table><tr><th>Option</th><th>Expected chips</th></tr>${a.options
         .slice(0, 6)
         .map((o, i) => `<tr class="${i === 0 ? "best" : ""}"><td>${esc(o.label)}</td><td>${o.ev >= 0 ? "+" : ""}${o.ev.toFixed(1)}</td></tr>`)
         .join("")}</table>`;
@@ -321,10 +358,32 @@ export class Overlay {
           return `<div class="villain"><b>${esc(v.name)}</b> <span class="muted">${v.position ?? ""} · ${width} · ${esc(style)}</span>${likely}</div>`;
         })
         .join("");
-      if (!a.usedReads) html += `<div class="muted">Reads off: advice assumes typical opponents.</div>`;
-      else if (!a.confident) html += `<div class="muted">Reads are still mostly default assumptions; they sharpen as hands are played.</div>`;
+      const rest = a.reasons.filter((r) => !key.slice(0, 3).includes(r));
+      if (rest.length) html += `<ul class="muted">${rest.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`;
+      html += `</details>`;
+      if (!a.usedReads) html += `<div class="muted">Reads are off (⚙): advice assumes typical opponents.</div>`;
+      else if (!a.confident) html += `<div class="muted">Still learning your mates; reads sharpen as you play.</div>`;
     }
     this.pane("advice").innerHTML = html;
+    this.pane("advice").querySelector("details")?.addEventListener("toggle", (e) => {
+      this.detailsOpen = (e.target as HTMLDetailsElement).open;
+      this.saveLayout();
+    });
+  }
+
+  private renderSettings(): void {
+    this.pane("settings").innerHTML = `
+      <div class="sect">Advice</div>
+      <label class="toggle"><input type="checkbox" data-act="reads" ${this.useReads ? "checked" : ""}> Use reads on mates</label>
+      <div class="muted">Off: ignore what's been learned and treat everyone as a typical player.</div>
+      <div class="sect">Your data</div>
+      <div class="muted">Everything the bot learns is stored in this browser. Back it up before reinstalling Chrome or clearing site data.</div>
+      <div class="row"><button class="btn" data-act="export">Back up</button><button class="btn" data-act="import">Restore…</button>
+        <button class="btn danger" data-act="reset-all">Forget everyone</button></div>
+      <input type="file" id="pb-import" accept=".json,application/json" hidden>
+      <div class="sect">Shortcuts</div>
+      <div class="muted"><b>Alt+B</b> hide or show the panel · drag the title bar to move it</div>
+      <div class="row"><button class="btn" data-act="close-settings">Done</button></div>`;
   }
 
   private renderPlayers(s: TableState, model: OpponentModel): void {

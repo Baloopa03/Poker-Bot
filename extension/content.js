@@ -1389,6 +1389,12 @@ tr.best td { color: #81c995; font-weight: 700; }
 .row { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
 .toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #9aa0a6; margin-bottom: 8px; cursor: pointer; }
 .scroll { overflow-x: auto; }
+.hint { font-size: 12px; font-weight: 500; opacity: .85; margin-top: 2px; }
+.hint b { font-weight: 800; }
+details.more { margin-top: 4px; }
+details.more summary { cursor: pointer; color: #8ab4f8; font-size: 12px; margin-bottom: 4px; }
+.btn.danger { color: #f28b82; }
+.head .btn { padding: 2px 7px; }
 .addrow { display: flex; gap: 6px; margin-bottom: 8px; }
 .addrow input { flex: 1; background: #24272e; color: #e8eaed; border: 1px solid #3a3f4b; border-radius: 6px; padding: 4px 8px; font: inherit; }
 .sect { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #9aa0a6; margin: 10px 0 4px; }
@@ -1424,12 +1430,14 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
       this.root.innerHTML = `<style>${CSS}</style>
       <div class="panel">
         <div class="head"><span class="title">\u2660 Poker Bot</span><span class="status">waiting for game\u2026</span>
+          <button class="btn" data-act="settings" title="Settings">\u2699</button>
           <button class="btn" data-act="min" title="Minimise (Alt+B)">\u2013</button></div>
         <div class="body">
           <div class="tabs"><div class="tab on" data-tab="advice">Advice</div><div class="tab" data-tab="players">Stats</div><div class="tab" data-tab="people">People</div><div class="tab" data-tab="ledger">Ledger</div></div>
           <div class="pane on" data-pane="advice"></div>
           <div class="pane" data-pane="players"></div>
           <div class="pane" data-pane="people"></div>
+          <div class="pane" data-pane="settings"></div>
           <div class="pane" data-pane="ledger"></div>
         </div>
       </div>`;
@@ -1450,6 +1458,17 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
         if (act === "capture") this.actions.saveCapture();
         const el = t.closest("[data-act]");
         if (act === "add-person") this.addPerson();
+        if (act === "settings") {
+          if (this.tab === "settings") this.showTab(this.lastTab);
+          else {
+            this.renderSettings();
+            this.showTab("settings");
+          }
+        }
+        if (act === "close-settings") this.showTab(this.lastTab);
+        if (act === "export") this.actions.exportData();
+        if (act === "import") this.root.querySelector("#pb-import")?.click();
+        if (act === "reset-all" && confirm("Forget everything learned about every player? Make a backup first if you might want it back.")) this.actions.forgetEveryone();
         if (act === "remove-name") this.actions.removeName(el.dataset.key, el.dataset.name);
         if (act === "rename") {
           const label = prompt("Rename this person:", el.dataset.label ?? "");
@@ -1460,6 +1479,10 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
       this.root.addEventListener("change", (e) => {
         const t = e.target;
         if (t.dataset.act === "reads") this.actions.setUseReads(t.checked);
+        if (t.id === "pb-import") {
+          const file = t.files?.[0];
+          if (file) void file.text().then((txt) => this.actions.importData(txt));
+        }
         if (t.dataset.act === "assign" && t.value) {
           let person = t.value;
           if (person === "__new") {
@@ -1513,11 +1536,12 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
     advice = null;
     thinking = false;
     useReads = true;
+    detailsOpen = false;
     saveLayout() {
       try {
         localStorage.setItem(
           "pokerbot:layout",
-          JSON.stringify({ left: this.panel.style.left, top: this.panel.style.top, min: this.panel.classList.contains("min"), tab: this.tab })
+          JSON.stringify({ left: this.panel.style.left, top: this.panel.style.top, min: this.panel.classList.contains("min"), tab: this.lastTab, details: this.detailsOpen })
         );
       } catch {
       }
@@ -1532,7 +1556,8 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
           this.panel.style.right = "auto";
         }
         if (l.min) this.panel.classList.add("min");
-        if (l.tab) this.showTab(l.tab);
+        if (l.tab && l.tab !== "settings") this.showTab(l.tab);
+        this.detailsOpen = !!l.details;
       } catch {
       }
     }
@@ -1567,7 +1592,9 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
         dragging = false;
       });
     }
+    lastTab = "advice";
     showTab(tab) {
+      if (tab !== "settings") this.lastTab = tab;
       this.tab = tab;
       if (this.panel) this.saveLayout();
       this.root.querySelectorAll("[data-tab]").forEach((el) => el.classList.toggle("on", el.dataset.tab === tab));
@@ -1602,8 +1629,7 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
       const hero = s.players.find((p) => p.seat === s.heroSeat);
       const heroTurn = !!hero && s.toActSeat === s.heroSeat;
       const a = heroTurn ? this.advice : null;
-      let html = `<label class="toggle" title="Off: ignore what's been learned about your mates and treat everyone as a typical player">
-      <input type="checkbox" data-act="reads" ${this.useReads ? "checked" : ""}> Use reads on mates</label>`;
+      let html = "";
       if (s.heroCards.length) html += `<div class="cards">${cardHtml(s.heroCards)}</div>`;
       html += `<div class="board">${s.board.length ? `Board ${cardHtml(s.board)}` : s.handActive ? "Preflop" : ""}${s.handActive ? ` \xB7 Pot ${s.pot}` : ""}</div>`;
       if (!s.handActive) html += `<div class="rec wait">Waiting for the next hand</div>`;
@@ -1611,23 +1637,50 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
       else if (!heroTurn) html += `<div class="rec wait">Waiting for your turn</div>`;
       else if (!a) html += `<div class="rec wait">${this.thinking ? "Thinking\u2026" : "Your turn"}</div>`;
       else {
-        html += `<div class="rec ${a.best.action}">${esc(a.best.label)}</div>`;
+        const b = a.best;
+        let hint = "";
+        if ((b.action === "bet" || b.action === "raise") && b.toTotal !== void 0)
+          hint = b.allIn ? "Use the all-in button" : `Enter <b>${b.toTotal - s.currentBet}</b> in the raise box`;
+        html += `<div class="rec ${b.action}">${esc(b.label)}${hint ? `<div class="hint">${hint}</div>` : ""}</div>`;
         html += `<div class="kpis">
         <div class="kpi"><b>${pct2(a.equity)}</b><span>win chance</span></div>
         <div class="kpi"><b>${a.potOdds ? pct2(a.potOdds) : "\u2013"}</b><span>needed to call</span></div>
         <div class="kpi"><b>${a.toCall || 0}</b><span>to call</span></div></div>`;
-        html += `<ul>${a.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`;
-        html += `<table><tr><th>Option</th><th>EV (chips)</th></tr>${a.options.slice(0, 6).map((o, i) => `<tr class="${i === 0 ? "best" : ""}"><td>${esc(o.label)}</td><td>${o.ev >= 0 ? "+" : ""}${o.ev.toFixed(1)}</td></tr>`).join("")}</table>`;
+        const key = a.reasons.filter((r) => !r.startsWith("Expected ") && !r.startsWith("Win chance "));
+        html += `<ul>${key.slice(0, 3).map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`;
+        html += `<details class="more" ${this.detailsOpen ? "open" : ""}><summary>Details</summary>`;
+        html += `<table><tr><th>Option</th><th>Expected chips</th></tr>${a.options.slice(0, 6).map((o, i) => `<tr class="${i === 0 ? "best" : ""}"><td>${esc(o.label)}</td><td>${o.ev >= 0 ? "+" : ""}${o.ev.toFixed(1)}</td></tr>`).join("")}</table>`;
         html += a.villains.map((v) => {
           const width = v.likely[0] === "any two cards" ? "any hand" : `top ${pct2(v.rangeWidth)} of hands`;
           const style = v.style.startsWith("unknown") ? "still learning" : v.style;
           const likely = v.likely[0] === "any two cards" ? "" : `<br><span class="muted">Likely: ${esc(v.likely.join(" "))}</span>`;
           return `<div class="villain"><b>${esc(v.name)}</b> <span class="muted">${v.position ?? ""} \xB7 ${width} \xB7 ${esc(style)}</span>${likely}</div>`;
         }).join("");
-        if (!a.usedReads) html += `<div class="muted">Reads off: advice assumes typical opponents.</div>`;
-        else if (!a.confident) html += `<div class="muted">Reads are still mostly default assumptions; they sharpen as hands are played.</div>`;
+        const rest = a.reasons.filter((r) => !key.slice(0, 3).includes(r));
+        if (rest.length) html += `<ul class="muted">${rest.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`;
+        html += `</details>`;
+        if (!a.usedReads) html += `<div class="muted">Reads are off (\u2699): advice assumes typical opponents.</div>`;
+        else if (!a.confident) html += `<div class="muted">Still learning your mates; reads sharpen as you play.</div>`;
       }
       this.pane("advice").innerHTML = html;
+      this.pane("advice").querySelector("details")?.addEventListener("toggle", (e) => {
+        this.detailsOpen = e.target.open;
+        this.saveLayout();
+      });
+    }
+    renderSettings() {
+      this.pane("settings").innerHTML = `
+      <div class="sect">Advice</div>
+      <label class="toggle"><input type="checkbox" data-act="reads" ${this.useReads ? "checked" : ""}> Use reads on mates</label>
+      <div class="muted">Off: ignore what's been learned and treat everyone as a typical player.</div>
+      <div class="sect">Your data</div>
+      <div class="muted">Everything the bot learns is stored in this browser. Back it up before reinstalling Chrome or clearing site data.</div>
+      <div class="row"><button class="btn" data-act="export">Back up</button><button class="btn" data-act="import">Restore\u2026</button>
+        <button class="btn danger" data-act="reset-all">Forget everyone</button></div>
+      <input type="file" id="pb-import" accept=".json,application/json" hidden>
+      <div class="sect">Shortcuts</div>
+      <div class="muted"><b>Alt+B</b> hide or show the panel \xB7 drag the title bar to move it</div>
+      <div class="row"><button class="btn" data-act="close-settings">Done</button></div>`;
     }
     renderPlayers(s, model2) {
       const heroKey = s.heroKey ? model2.resolve(s.heroKey, s.players.find((p) => p.key === s.heroKey)?.name) : void 0;
@@ -2402,6 +2455,29 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
     },
     forget(key) {
       model.forget(key);
+      peopleChanged();
+    },
+    exportData() {
+      const data = { app: "poker-bot", version: 1, savedAt: (/* @__PURE__ */ new Date()).toISOString(), model: model.toJSON(), settings: { useReads } };
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], { type: "application/json" }));
+      a.download = `poker-bot-backup-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.json`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1e3);
+    },
+    importData(json) {
+      try {
+        const data = JSON.parse(json);
+        if (data?.app !== "poker-bot" || !data.model) throw new Error("not a Poker Bot backup");
+        model = OpponentModel.fromJSON(data.model);
+        peopleChanged();
+        alert("Backup restored.");
+      } catch (e) {
+        alert(`Couldn't restore: ${e.message}`);
+      }
+    },
+    forgetEveryone() {
+      model = new OpponentModel();
       peopleChanged();
     }
   });

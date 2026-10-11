@@ -61,6 +61,10 @@ await page.waitForTimeout(800);
 const text = await page.evaluate(() => document.getElementById("pokerbot-overlay")?.shadowRoot?.querySelector(".panel")?.innerText ?? "NO OVERLAY");
 console.log(text);
 await page.screenshot({ path: join(shotDir, "e2e-advice.png") });
+await page.click('[data-act="settings"]');
+await page.waitForTimeout(100);
+await page.screenshot({ path: join(shotDir, "e2e-settings.png") });
+await page.click('[data-act="close-settings"]');
 for (const tab of ["players", "ledger"]) {
   await page.evaluate((t) => document.getElementById("pokerbot-overlay").shadowRoot.querySelector(`[data-tab="${t}"]`).click(), tab);
   await page.waitForTimeout(100);

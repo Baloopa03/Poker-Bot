@@ -23,14 +23,10 @@ mates is kept.
 
 ## Using it
 
-- **Advice tab:** on your turn it shows the recommended action and size, your
-  win chance against each opponent's likely hands, the pot odds, why it chose
-  this play, the expected value (EV) of every option, and what it thinks each
-  opponent holds.
-- **Ledger tab:** buy-ins, re-buys, cash-outs, current stack and net result for
-  everyone in the lobby. It works whether or not you're the lobby admin.
-- **Use reads on mates** (Advice tab): switch off to ignore everything learned
-  about your mates and get advice that treats everyone as a typical player.
+- **Advice tab:** on your turn it shows the move, plus exactly what to type in
+  pokerpatio's raise box (which counts the amount *on top of* the current bet),
+  your win chance, the odds you need to call, and the main reasons. **Details**
+  expands every option's expected chips and what each opponent probably holds.
 - **Stats tab:** each mate's tendencies (how often they play hands, raise,
   fold to bets, bluff…). An asterisk means there's still too little data.
 - **People tab:** type a mate's real name ("Isaiah") and click **Add**. Every
@@ -41,7 +37,11 @@ mates is kept.
   You are never listed.
 - **Shown hands:** when a mate chooses to show after a hand (after folding, or
   after winning without a showdown), the bot uses it to check how often they bluff.
-- **Alt+B** hides or shows the panel. Drag it by its title bar.
+- **⚙ Settings:** turn *Use reads on mates* off to get advice that treats
+  everyone as a typical player. **Back up** or **Restore** everything the bot
+  has learned (it lives in your browser, so back up before reinstalling Chrome).
+- **Alt+B** hides or shows the panel. Drag it by its title bar; it remembers
+  where you put it.
 
 What it learns about your mates is saved in your browser and carries over
 between nights, so it gets sharper the more you play. The ledger is saved per

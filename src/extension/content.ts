@@ -63,6 +63,29 @@ const overlay = new Overlay({
     model.forget(key);
     peopleChanged();
   },
+  exportData() {
+    const data = { app: "poker-bot", version: 1, savedAt: new Date().toISOString(), model: model.toJSON(), settings: { useReads } };
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], { type: "application/json" }));
+    a.download = `poker-bot-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  },
+  importData(json) {
+    try {
+      const data = JSON.parse(json);
+      if (data?.app !== "poker-bot" || !data.model) throw new Error("not a Poker Bot backup");
+      model = OpponentModel.fromJSON(data.model);
+      peopleChanged();
+      alert("Backup restored.");
+    } catch (e) {
+      alert(`Couldn't restore: ${(e as Error).message}`);
+    }
+  },
+  forgetEveryone() {
+    model = new OpponentModel();
+    peopleChanged();
+  },
 });
 
 const storage = typeof chrome !== "undefined" ? chrome.storage?.local : undefined;
