@@ -1,0 +1,19 @@
+{
+  "name": "poker-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Advisor for private 3-handed NLHE games on pokerpatio.com",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.3.5",
+    "@types/node": "22.15.3",
+    "esbuild": "0.25.10",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}
