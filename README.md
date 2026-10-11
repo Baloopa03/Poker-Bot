@@ -23,19 +23,18 @@ the extension in `chrome://extensions` and refresh the game tab.
   win chance against each opponent's likely hands, the pot odds, why it chose
   this play, the expected value (EV) of every option, and what it thinks each
   opponent holds.
-- **Players tab:** each mate's tendencies (how often they play hands, raise,
-  fold to bets, bluff…). An asterisk means there's still too little data and it's
-  mostly the default assumption.
 - **Ledger tab:** buy-ins, re-buys, cash-outs, current stack and net result for
   everyone in the lobby. It works whether or not you're the lobby admin.
 - **Use reads on mates** (Advice tab): switch off to ignore everything learned
   about your mates and get advice that treats everyone as a typical player.
-- **People** (Players tab): you all play as guests, so the bot counts any guest
-  using a name it already knows as that person. Click **Edit** under a player to
-  name them (e.g. "Isaiah") and list every name they play under ("Test2, Izzy").
-  Their history is combined, and future nights under any of those names add to it.
-  **Same person as…** combines two columns directly. If two mates ever share a
-  name, remove it from the list with Edit.
+- **Stats tab:** each mate's tendencies (how often they play hands, raise,
+  fold to bets, bluff…). An asterisk means there's still too little data.
+- **People tab:** type a mate's real name ("Isaiah") and click **Add**. Every
+  in-game name you've played against is listed under *Names not assigned yet*.
+  Drag a name onto a person, or use its **Add to…** menu, and all its history
+  joins that person. From then on, any guest using one of those names counts as
+  that person on future nights. **×** removes a name, ✎ renames, 🗑 forgets.
+  You are never listed.
 - **Shown hands:** when a mate chooses to show after a hand (after folding, or
   after winning without a showdown), the bot uses it to check how often they bluff.
 - **Alt+B** hides or shows the panel. Drag it by its title bar.

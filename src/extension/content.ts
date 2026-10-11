@@ -42,19 +42,26 @@ const overlay = new Overlay({
     storage?.set({ [SETTINGS_KEY]: { useReads } });
     recomputeAdvice();
   },
-  editPerson(key, label, names, removed) {
-    for (const n of removed) model.removeName(key, n);
-    for (const n of names) model.addName(key, n);
-    model.setLabel(key, label);
-    saveModel();
-    recomputeAdvice();
-    render();
+  createPerson(label) {
+    const key = model.createPerson(label);
+    peopleChanged();
+    return key;
   },
-  merge(fromKey, intoKey) {
-    model.merge(fromKey, intoKey);
-    saveModel();
-    recomputeAdvice();
-    render();
+  assign(nameKey, personKey) {
+    model.merge(nameKey, personKey);
+    peopleChanged();
+  },
+  removeName(personKey, name) {
+    model.removeName(personKey, name);
+    peopleChanged();
+  },
+  renamePerson(personKey, label) {
+    model.setLabel(personKey, label);
+    peopleChanged();
+  },
+  forget(key) {
+    model.forget(key);
+    peopleChanged();
   },
 });
 
@@ -69,6 +76,12 @@ storage?.get([MODEL_KEY, SETTINGS_KEY]).then((v) => {
   }
   render();
 });
+
+function peopleChanged(): void {
+  saveModel();
+  recomputeAdvice();
+  render();
+}
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 function saveModel(): void {
@@ -122,6 +135,7 @@ tracker.on("heroTurn", recomputeAdvice);
 
 tracker.on("handComplete", (h) => {
   model.update(h);
+  if (h.heroKey) model.markMe(h.heroKey, h.players.find((p) => p.key === h.heroKey)?.name);
   saveModel();
   saveLedger();
 });

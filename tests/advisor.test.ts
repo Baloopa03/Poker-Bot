@@ -300,3 +300,41 @@ describe("bigger tables", () => {
     legal(s, a);
   });
 });
+
+describe("people manager", () => {
+  const h = (key: string, name: string, hero = false) => ({
+    handNumber: 1,
+    sb: 8,
+    bb: 15,
+    board: [],
+    heroKey: hero ? key : undefined,
+    players: [
+      { key, name, seat: "s1", startStack: 500, position: "BTN" as const },
+      { key: "x", name: "Filler", seat: "s2", startStack: 500, position: "BB" as const },
+    ],
+    actions: [{ key, seat: "s1", street: "preflop" as const, type: "raise" as const, added: 38, toTotal: 38, facing: 15, potBefore: 23, allIn: false, raisesBefore: 0, auto: false }],
+  });
+
+  it("adds people, assigns names to them and lists the rest", () => {
+    const m = new OpponentModel();
+    m.update(h("g1", "Test2"));
+    m.update(h("g2", "Izzy"));
+    m.update(h("g3", "JT"));
+    m.update(h("me1", "Jack"));
+    m.markMe("me1", "Jack");
+    const isaiah = m.createPerson("Isaiah");
+    const justin = m.createPerson("Justin");
+    m.merge("g1", isaiah);
+    m.merge("g2", isaiah);
+    m.merge("g3", justin);
+    expect(m.people().map((p) => [p.label, p.hands, m.namesOf(p.key)])).toEqual([
+      ["Isaiah", 2, ["Test2", "Izzy"]],
+      ["Justin", 1, ["JT"]],
+    ]);
+    expect(m.unassigned().map((p) => p.name)).toEqual(["Filler"]); // you (Jack) are never listed
+    m.update(h("g9", "izzy")); // a new night, a new guest account
+    expect(m.profile("g9", "izzy").name).toBe("Isaiah");
+    m.forget(justin);
+    expect(m.people().map((p) => p.label)).toEqual(["Isaiah"]);
+  });
+});

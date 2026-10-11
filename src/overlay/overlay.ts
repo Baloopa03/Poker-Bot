@@ -46,6 +46,20 @@ tr.best td { color: #81c995; font-weight: 700; }
 .row { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
 .toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #9aa0a6; margin-bottom: 8px; cursor: pointer; }
 .scroll { overflow-x: auto; }
+.addrow { display: flex; gap: 6px; margin-bottom: 8px; }
+.addrow input { flex: 1; background: #24272e; color: #e8eaed; border: 1px solid #3a3f4b; border-radius: 6px; padding: 4px 8px; font: inherit; }
+.sect { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #9aa0a6; margin: 10px 0 4px; }
+.person { border: 1px dashed #3a3f4b; border-radius: 8px; padding: 6px 8px; margin: 6px 0; }
+.person.over { border-color: #8ab4f8; background: #1f2c3c; }
+.phead { display: flex; align-items: center; gap: 6px; }
+.phead .muted { margin-left: auto; }
+.icon { background: none; border: 0; color: #9aa0a6; cursor: pointer; font-size: 13px; padding: 0 2px; }
+.icon:hover { color: #e8eaed; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.chip { display: inline-flex; align-items: center; gap: 2px; background: #2c313b; border-radius: 12px; padding: 1px 4px 1px 8px; font-size: 12px; }
+.x { background: none; border: 0; color: #9aa0a6; cursor: pointer; font-size: 13px; line-height: 1; }
+.x:hover { color: #f28b82; }
+.loose { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 4px 6px; margin: 3px 0; background: #24272e; border-radius: 6px; cursor: grab; }
 select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-radius: 4px; font: inherit; font-size: 11px; max-width: 90px; }
 `;
 
@@ -67,10 +81,13 @@ export interface OverlayActions {
   resetLedger(): void;
   saveCapture(): void;
   setUseReads(on: boolean): void;
-  /** Merge profile `fromKey` into `intoKey` (same mate, different account). */
-  merge(fromKey: string, intoKey: string): void;
-  /** Set the person name and the in-game names that belong to them. */
-  editPerson(key: string, label: string, names: string[], removed: string[]): void;
+  /** Create a person (e.g. "Isaiah"); returns their key. */
+  createPerson(label: string): string;
+  /** Put an in-game name (and its history) under a person. */
+  assign(nameKey: string, personKey: string): void;
+  removeName(personKey: string, name: string): void;
+  renamePerson(personKey: string, label: string): void;
+  forget(key: string): void;
 }
 
 export class Overlay {
@@ -90,9 +107,10 @@ export class Overlay {
         <div class="head"><span class="title">♠ Poker Bot</span><span class="status">waiting for game…</span>
           <button class="btn" data-act="min" title="Minimise (Alt+B)">–</button></div>
         <div class="body">
-          <div class="tabs"><div class="tab on" data-tab="advice">Advice</div><div class="tab" data-tab="players">Players</div><div class="tab" data-tab="ledger">Ledger</div></div>
+          <div class="tabs"><div class="tab on" data-tab="advice">Advice</div><div class="tab" data-tab="players">Stats</div><div class="tab" data-tab="people">People</div><div class="tab" data-tab="ledger">Ledger</div></div>
           <div class="pane on" data-pane="advice"></div>
           <div class="pane" data-pane="players"></div>
+          <div class="pane" data-pane="people"></div>
           <div class="pane" data-pane="ledger"></div>
         </div>
       </div>`;
@@ -109,19 +127,56 @@ export class Overlay {
       if (act === "min") this.panel.classList.toggle("min");
       if (act === "reset" && confirm("Reset the ledger for this lobby?")) this.actions.resetLedger();
       if (act === "capture") this.actions.saveCapture();
-      if (act === "edit") this.editPerson(t.closest<HTMLElement>("[data-act]")!);
+      const el = t.closest<HTMLElement>("[data-act]");
+      if (act === "add-person") this.addPerson();
+      if (act === "remove-name") this.actions.removeName(el!.dataset.key!, el!.dataset.name!);
+      if (act === "rename") {
+        const label = prompt("Rename this person:", el!.dataset.label ?? "");
+        if (label?.trim()) this.actions.renamePerson(el!.dataset.key!, label.trim());
+      }
+      if (act === "forget" && confirm(`Forget ${el!.dataset.label} and everything learned about them?`)) this.actions.forget(el!.dataset.key!);
     });
     this.root.addEventListener("change", (e) => {
       const t = e.target as HTMLInputElement | HTMLSelectElement;
       if (t.dataset.act === "reads") this.actions.setUseReads((t as HTMLInputElement).checked);
-      if (t.dataset.act === "merge" && t.value) {
-        const from = t.dataset.key!;
-        const fromName = t.dataset.name!;
-        const intoName = (t as HTMLSelectElement).selectedOptions[0]?.textContent ?? t.value;
-        if (confirm(`Merge ${fromName} into ${intoName}? Their history is combined and future hands from either account count as ${intoName}. This can't be undone.`))
-          this.actions.merge(from, t.value);
-        else t.value = "";
+      if (t.dataset.act === "assign" && t.value) {
+        let person = t.value;
+        if (person === "__new") {
+          const label = prompt(`Who is ${t.dataset.name}? (e.g. Isaiah)`, "");
+          if (!label?.trim()) {
+            t.value = "";
+            return;
+          }
+          person = this.actions.createPerson(label.trim());
+        }
+        this.actions.assign(t.dataset.key!, person);
       }
+    });
+    this.root.addEventListener("keydown", (e) => {
+      const ke = e as KeyboardEvent;
+      if ((ke.target as HTMLElement).id === "pb-new-person" && ke.key === "Enter") this.addPerson();
+      ke.stopPropagation(); // typing in the panel must not trigger game hotkeys
+    });
+    // Drag a name onto a person.
+    this.root.addEventListener("dragstart", (e) => {
+      const key = (e.target as HTMLElement).closest<HTMLElement>("[data-drag]")?.dataset.drag;
+      if (key) (e as DragEvent).dataTransfer?.setData("text/plain", key);
+    });
+    this.root.addEventListener("dragover", (e) => {
+      const drop = (e.target as HTMLElement).closest<HTMLElement>("[data-drop]");
+      if (drop) {
+        e.preventDefault();
+        drop.classList.add("over");
+      }
+    });
+    this.root.addEventListener("dragleave", (e) => (e.target as HTMLElement).closest<HTMLElement>("[data-drop]")?.classList.remove("over"));
+    this.root.addEventListener("drop", (e) => {
+      const drop = (e.target as HTMLElement).closest<HTMLElement>("[data-drop]");
+      const key = (e as DragEvent).dataTransfer?.getData("text/plain");
+      if (!drop || !key) return;
+      e.preventDefault();
+      drop.classList.remove("over");
+      if (key !== drop.dataset.drop) this.actions.assign(key, drop.dataset.drop!);
     });
     window.addEventListener("keydown", (e) => {
       if (e.altKey && e.key.toLowerCase() === "b") this.panel.classList.toggle("min");
@@ -129,20 +184,12 @@ export class Overlay {
     this.makeDraggable();
   }
 
-  private editPerson(el: HTMLElement): void {
-    const key = el.dataset.key!;
-    const current = el.dataset.label ?? "";
-    const names = (el.dataset.names ?? "").split("|").filter(Boolean);
-    const label = prompt("Who is this? (e.g. Isaiah)", current || el.dataset.name || "");
-    if (label === null) return;
-    const list = prompt(
-      `Names ${label || "they"} plays under, comma separated.\nAny guest using one of these names is counted as ${label || "this person"}.`,
-      names.join(", "),
-    );
-    if (list === null) return;
-    const next = list.split(",").map((n) => n.trim()).filter(Boolean);
-    const removed = names.filter((n) => !next.some((m) => m.toLowerCase() === n.toLowerCase()));
-    this.actions.editPerson(key, label, next, removed);
+  private addPerson(): void {
+    const input = this.root.querySelector<HTMLInputElement>("#pb-new-person");
+    const label = input?.value.trim();
+    if (!label) return;
+    this.actions.createPerson(label);
+    input!.value = "";
   }
 
   private makeDraggable(): void {
@@ -197,6 +244,7 @@ export class Overlay {
     this.setStatus(s.handActive ? `hand ${s.handNumber} · ${s.street} · ${s.sb}/${s.bb}${s.paused ? " · paused" : ""}` : s.players.length ? "between hands" : "waiting for game…");
     this.renderAdvice(s);
     this.renderPlayers(s, model);
+    this.renderPeople(model);
     this.renderLedger(ledger);
   }
 
@@ -238,7 +286,7 @@ export class Overlay {
     const keys: string[] = [];
     const add = (k: string, name?: string) => {
       const r = model.resolve(k, name);
-      if (r !== heroKey && !keys.includes(r)) keys.push(r);
+      if (r !== heroKey && !model.players.get(r)?.me && !keys.includes(r)) keys.push(r);
     };
     for (const p of s.players) if (p.seat !== s.heroSeat) add(p.key, p.name);
     for (const p of model.players.values()) add(p.key);
@@ -284,22 +332,42 @@ export class Overlay {
         })
         .join("")}</tr>`;
     html += `<tr><td>Style</td>${profiles.map((p) => `<td>${esc(p.style.split(" (")[0])}</td>`).join("")}</tr>`;
-    html += `<tr><td>Same person as…</td>${profiles
-      .map(
-        (p) => `<td><select data-act="merge" data-key="${esc(p.key)}" data-name="${esc(p.name)}"><option value="">–</option>${profiles
-          .filter((o) => o.key !== p.key)
-          .map((o) => `<option value="${esc(o.key)}">${esc(o.name)}</option>`)
-          .join("")}</select></td>`,
-      )
-      .join("")}</tr>`;
-    html += `<tr><td>Person</td>${profiles
-      .map((p) => {
-        const st = model.players.get(p.key);
-        return `<td><button class="btn" data-act="edit" data-key="${esc(p.key)}" data-name="${esc(st?.name ?? p.name)}" data-label="${esc(st?.label ?? "")}" data-names="${esc(allNames(p.key).join("|"))}">Edit</button></td>`;
-      })
-      .join("")}</tr></table></div>`;
-    html += `<div class="muted">Preflop numbers are for ${dealt <= 2 ? "heads-up" : dealt <= 4 ? "3–4 player" : "5+ player"} games. * fewer than 5 samples: mostly the default assumption. A guest who plays under a name already linked to someone is counted as that person automatically. Use <b>Edit</b> to give someone a name (e.g. Isaiah) and list the names they play under, or "Same person as…" to combine two columns.</div>`;
+    html += `</table></div>`;
+    html += `<div class="muted">Preflop numbers are for ${dealt <= 2 ? "heads-up" : dealt <= 4 ? "3–4 player" : "5+ player"} games. * fewer than 5 samples: mostly the default assumption. Use the People tab to put each mate's names under one person.</div>`;
     this.pane("players").innerHTML = html;
+  }
+
+  private peopleSig = "";
+  private renderPeople(model: OpponentModel): void {
+    const people = model.people();
+    const loose = model.unassigned();
+    // Only redraw when something changed, so typing a name isn't interrupted.
+    const sig = JSON.stringify([people.map((p) => [p.key, p.label, p.hands, model.namesOf(p.key)]), loose.map((p) => [p.key, p.name, p.hands])]);
+    if (sig === this.peopleSig) return;
+    this.peopleSig = sig;
+    const options = people.map((p) => `<option value="${esc(p.key)}">${esc(p.label!)}</option>`).join("");
+    let html = `<div class="addrow"><input id="pb-new-person" placeholder="Add a person, e.g. Isaiah" autocomplete="off"><button class="btn" data-act="add-person">Add</button></div>`;
+    html += `<div class="sect">People</div>`;
+    if (!people.length) html += `<div class="muted">No people yet. Add your mates above, then drag their names onto them.</div>`;
+    for (const p of people) {
+      const names = model.namesOf(p.key);
+      html += `<div class="person" data-drop="${esc(p.key)}">
+        <div class="phead"><b>${esc(p.label!)}</b><span class="muted">${p.hands} hands</span>
+          <button class="icon" title="Rename" data-act="rename" data-key="${esc(p.key)}" data-label="${esc(p.label!)}">✎</button>
+          <button class="icon" title="Forget" data-act="forget" data-key="${esc(p.key)}" data-label="${esc(p.label!)}">🗑</button></div>
+        <div class="chips">${
+          names.length
+            ? names.map((n) => `<span class="chip">${esc(n)}<button class="x" title="Not ${esc(p.label!)}" data-act="remove-name" data-key="${esc(p.key)}" data-name="${esc(n)}">×</button></span>`).join("")
+            : `<span class="muted">Drag names here</span>`
+        }</div></div>`;
+    }
+    html += `<div class="sect">Names not assigned yet</div>`;
+    if (!loose.length) html += `<div class="muted">Every opponent name is assigned.</div>`;
+    for (const p of loose)
+      html += `<div class="loose" draggable="true" data-drag="${esc(p.key)}"><span>⠿ ${esc(p.name)} <span class="muted">${p.hands} hands</span></span>
+        <select data-act="assign" data-key="${esc(p.key)}" data-name="${esc(p.name)}"><option value="">Add to…</option>${options}<option value="__new">New person…</option></select></div>`;
+    html += `<div class="muted">A name you've assigned is recognised automatically on future nights. Removing a name stops future games counting towards that person; stats already combined stay.</div>`;
+    this.pane("people").innerHTML = html;
   }
 
   private renderLedger(rows: LedgerEntry[]): void {

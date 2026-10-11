@@ -84,6 +84,8 @@ export interface PlayerStats {
   aliasNames?: string[];
   /** Person name chosen by you (e.g. "Isaiah"); shown instead of the in-game name. */
   label?: string;
+  /** This profile is you (the hero), not an opponent. */
+  me?: boolean;
 }
 
 export interface Profile {
@@ -149,7 +151,8 @@ export class OpponentModel {
     const n = norm(name);
     if (!n) return undefined;
     for (const p of this.players.values())
-      if (norm(p.label ?? "") === n || norm(p.name) === n || p.aliasNames?.some((a) => norm(a) === n)) return p.key;
+      if (p.me) continue;
+      else if (norm(p.label ?? "") === n || norm(p.name) === n || p.aliasNames?.some((a) => norm(a) === n)) return p.key;
     return undefined;
   }
 
@@ -211,6 +214,56 @@ export class OpponentModel {
       this.players.delete(from);
     }
     this.aliases.set(from, into);
+  }
+
+  // ---------- people management ----------
+
+  /** Create an (empty) person you can assign names to. Returns their key, or the existing one. */
+  createPerson(label: string): string {
+    const clean = label.trim();
+    const existing = this.findByName(clean);
+    if (existing) {
+      const p = this.players.get(existing)!;
+      if (!p.label) p.label = clean;
+      return existing;
+    }
+    let key = `person:${norm(clean).replace(/\s+/g, "-")}`;
+    while (this.players.has(key)) key += "_";
+    this.players.set(key, { key, name: clean, label: clean, hands: 0, counts: {} });
+    return key;
+  }
+
+  /** People you've named, alphabetically. */
+  people(): PlayerStats[] {
+    return [...this.players.values()].filter((p) => p.label && !p.me).sort((a, b) => a.label!.localeCompare(b.label!));
+  }
+
+  /** Opponent names not yet assigned to a person, most-played first. */
+  unassigned(): PlayerStats[] {
+    return [...this.players.values()].filter((p) => !p.label && !p.me).sort((a, b) => b.hands - a.hands);
+  }
+
+  /** Every in-game name a profile has played under. */
+  namesOf(key: string): string[] {
+    const p = this.players.get(this.resolve(key));
+    if (!p) return [];
+    return [...new Set([...(p.label && norm(p.name) === norm(p.label) ? [] : [p.name]), ...(p.aliasNames ?? [])])].filter(
+      (n) => n && norm(n) !== norm(p.label ?? ""),
+    );
+  }
+
+  /** Delete a person or name and everything learned about them. */
+  forget(key: string): void {
+    const k = this.resolve(key);
+    this.players.delete(k);
+    for (const [a, b] of [...this.aliases]) if (b === k || a === k) this.aliases.delete(a);
+  }
+
+  /** Mark a profile as yours so it never shows up as an opponent. */
+  markMe(key: string, name?: string): void {
+    const k = this.resolve(key, name);
+    const p = this.players.get(k) ?? this.stats(k, name ?? k);
+    p.me = true;
   }
 
   private stats(key: string, name: string): PlayerStats {

@@ -67,4 +67,20 @@ for (const tab of ["players", "ledger"]) {
   await page.screenshot({ path: join(shotDir, `e2e-${tab}.png`) });
   console.log(`--- ${tab} ---\n` + (await page.evaluate(() => document.getElementById("pokerbot-overlay").shadowRoot.querySelector(".pane.on").innerText)));
 }
+if (process.env.PEOPLE) {
+  // Exercise the People tab like a user would.
+  await page.click('[data-tab="people"]');
+  for (const name of ["Isaiah", "Justin"]) {
+    await page.fill("#pb-new-person", name);
+    await page.click('[data-act="add-person"]');
+    await page.waitForTimeout(100);
+  }
+  const isaiah = await page.getAttribute('.person:has-text("Isaiah")', "data-drop");
+  await page.selectOption('.loose:has-text("Test2") select', isaiah);
+  await page.waitForTimeout(150);
+  await page.dragAndDrop('.loose:has-text("Test")', '.person:has-text("Justin")');
+  await page.waitForTimeout(150);
+  await page.screenshot({ path: join(shotDir, "e2e-people.png") });
+  console.log("--- people ---\n" + (await page.evaluate(() => document.getElementById("pokerbot-overlay").shadowRoot.querySelector(".pane.on").innerText)));
+}
 await ctx.close();
