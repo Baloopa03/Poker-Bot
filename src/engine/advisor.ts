@@ -1,0 +1,456 @@
+import { type Card, cardsToString } from "./cards";
+import { equity, riverEquityExact } from "./equity";
+import { COMBOS as COMBO_CARDS, NUM_COMBOS, Range, classOf } from "./range";
+import { preflopComboStrengths, preflopScores } from "./strength";
+import type { OpponentModel, Profile } from "../opponents/model";
+import { boardStrengths, estimateRange, rangeWidth, respondToBet } from "../opponents/ranges";
+import type { PlayerState, Position, TableState } from "../tracker/types";
+
+// The decision engine. Every legal option is scored by expected chips won
+// relative to folding now, using each villain's estimated range, how often
+// they fold to a bet of that size, whether they raise back, and how much
+// equity hero realises when the hand goes on.
+
+export type AdviceAction = "fold" | "check" | "call" | "bet" | "raise";
+
+export interface AdviceOption {
+  action: AdviceAction;
+  /** Street total after the action (bets/raises), e.g. "raise to 45". */
+  toTotal?: number;
+  /** Chips hero adds now. */
+  added: number;
+  allIn: boolean;
+  ev: number;
+  label: string;
+  /** Probability every villain folds (aggressive options). */
+  foldProb?: number;
+  /** Hero equity when called (aggressive options). */
+  equityWhenCalled?: number;
+}
+
+export interface VillainView {
+  key: string;
+  name: string;
+  position?: Position;
+  /** Estimated range width, 0..1 of all hands. */
+  rangeWidth: number;
+  style: string;
+  hands: number;
+  /** A few of the most likely hand classes. */
+  likely: string[];
+}
+
+export interface Advice {
+  street: TableState["street"];
+  best: AdviceOption;
+  options: AdviceOption[];
+  /** Hero equity vs all live villains' current ranges. */
+  equity: number;
+  toCall: number;
+  pot: number;
+  /** Equity needed to call (0 if nothing to call). */
+  potOdds: number;
+  reasons: string[];
+  villains: VillainView[];
+  heroCards: string;
+  /** False while reads are mostly priors (few hands seen). */
+  confident: boolean;
+}
+
+export interface AdvisorOptions {
+  iterations?: number;
+  seed?: number;
+}
+
+const POSTFLOP_ORDER: Record<Position, number> = { SB: 0, BB: 1, UTG: 2, MP: 3, CO: 4, BTN: 5 };
+const fmt = (n: number) => (Math.abs(n) >= 100 ? Math.round(n).toString() : n.toFixed(1).replace(/\.0$/, ""));
+const pct = (x: number) => `${Math.round(x * 100)}%`;
+
+interface Ctx {
+  s: TableState;
+  hero: PlayerState;
+  heroCards: [Card, Card];
+  villains: PlayerState[];
+  profiles: Profile[];
+  ranges: Range[];
+  headsUp: boolean;
+  heroInPosition: boolean;
+  toCall: number;
+  bb: number;
+  iterations: number;
+  seed: number;
+  preflop: boolean;
+  /** Raises so far on this street (excluding blinds). */
+  raises: number;
+  heroWasPreflopAggressor: boolean;
+}
+
+export function advise(s: TableState, model: OpponentModel, opts: AdvisorOptions = {}): Advice | null {
+  const hero = s.players.find((p) => p.seat === s.heroSeat);
+  if (!hero || s.heroCards.length !== 2 || hero.folded || !s.handActive || s.street === "showdown") return null;
+  if (hero.stack <= 0) return null;
+  const heroCards = s.heroCards as unknown as [Card, Card];
+  const villains = s.players.filter((p) => p.key !== hero.key && p.inHand && !p.folded);
+  if (!villains.length) return null;
+
+  const dealt = s.players.filter((p) => p.inHand).length;
+  const headsUp = dealt === 2;
+  const profiles = villains.map((v) => model.profile(v.key, v.name));
+  const ranges = villains.map((v, i) =>
+    estimateRange({ key: v.key, profile: profiles[i], position: v.position, headsUp, actions: s.actions, board: s.board, dead: heroCards }),
+  );
+  // Never let a read wipe a range out entirely.
+  ranges.forEach((r, i) => {
+    if (r.size() < 1) ranges[i] = Range.full().removeCards([...heroCards, ...s.board]);
+  });
+
+  const order = (p: PlayerState) => (headsUp ? (p.position === "SB" ? 1 : 0) : POSTFLOP_ORDER[p.position ?? "BB"]);
+  const heroInPosition = villains.every((v) => order(hero) > order(v));
+  const preflopRaisers = s.actions.filter((a) => a.street === "preflop" && (a.type === "raise" || a.type === "bet"));
+  const ctx: Ctx = {
+    s,
+    hero,
+    heroCards,
+    villains,
+    profiles,
+    ranges,
+    headsUp,
+    heroInPosition,
+    toCall: Math.min(s.currentBet - hero.committedStreet, hero.stack),
+    bb: s.bb || 1,
+    iterations: opts.iterations ?? 2500,
+    seed: opts.seed ?? s.handNumber * 7919 + s.board.length * 31 + s.actions.length,
+    preflop: s.street === "preflop",
+    raises: s.actions.filter((a) => a.street === s.street && (a.type === "raise" || a.type === "bet")).length,
+    heroWasPreflopAggressor: preflopRaisers.length > 0 && preflopRaisers[preflopRaisers.length - 1].key === hero.key,
+  };
+
+  const eqAll = equityVs(ctx, ranges);
+  const options = buildOptions(ctx, eqAll);
+  options.sort((a, b) => b.ev - a.ev);
+  const best = options[0];
+
+  const potOdds = ctx.toCall > 0 ? ctx.toCall / (s.pot + ctx.toCall) : 0;
+  const villainViews: VillainView[] = villains.map((v, i) => ({
+    key: v.key,
+    name: v.name,
+    position: v.position,
+    rangeWidth: rangeWidth(ranges[i]),
+    style: profiles[i].style,
+    hands: profiles[i].hands,
+    likely: likelyClasses(ranges[i], s.board.length >= 3 ? boardStrengths(s.board) : preflopComboStrengths()),
+  }));
+
+  return {
+    street: s.street,
+    best,
+    options,
+    equity: eqAll,
+    toCall: ctx.toCall,
+    pot: s.pot,
+    potOdds,
+    reasons: explain(ctx, best, options, eqAll, potOdds),
+    villains: villainViews,
+    heroCards: cardsToString(heroCards),
+    confident: profiles.every((p) => p.hands >= 25),
+  };
+}
+
+function equityVs(ctx: Ctx, ranges: Range[], salt = 0): number {
+  const live = ranges.filter((r) => r.size() > 1e-6);
+  if (!live.length) return 1;
+  if (live.length === 1 && ctx.s.board.length === 5) return riverEquityExact(ctx.heroCards, ctx.s.board, live[0]).equity;
+  try {
+    return equity({ hero: ctx.heroCards, board: ctx.s.board, villains: live, iterations: ctx.iterations, seed: ctx.seed + salt }).equity;
+  } catch {
+    return 0.5;
+  }
+}
+
+/** Fraction of equity hero actually collects when the hand continues to later streets. */
+function realization(ctx: Ctx, allInNow: boolean): number {
+  if (allInNow || ctx.s.street === "river") return 1;
+  if (ctx.preflop) return ctx.heroInPosition ? 0.9 : ctx.hero.position === "SB" ? 0.72 : 0.8;
+  return ctx.heroInPosition ? 0.97 : 0.88;
+}
+
+/** How often this villain continues vs a ~2/3-pot bet / standard raise in the current spot. */
+function baseContinue(ctx: Ctx, i: number): number {
+  const p = ctx.profiles[i];
+  const v = ctx.villains[i];
+  if (ctx.preflop) {
+    if (ctx.raises === 0) {
+      // Hero opening or isolating: blinds defend at roughly 1 − fold-to-steal.
+      const defend = v.position === "SB" || v.position === "BB" ? 1 - p.stat("foldToSteal") : p.stat("callOpen") + p.stat("threeBet");
+      return Math.min(0.9, Math.max(0.1, defend));
+    }
+    if (ctx.raises === 1) return Math.min(0.9, Math.max(0.15, 1 - p.stat("foldTo3Bet")));
+    return 0.45; // vs 4-bets: continue with a fair share of an already strong range
+  }
+  const cbet = ctx.s.street === "flop" && ctx.heroWasPreflopAggressor && ctx.raises === 0;
+  return 1 - (cbet ? p.stat("foldToCbet") : p.foldToBet(ctx.s.street as "flop" | "turn" | "river"));
+}
+
+/**
+ * EV of calling. Villains who already matched the bet are in for sure;
+ * villains still to act behind us may fold or continue (enumerated).
+ */
+function callEV(ctx: Ctx, eqAll: number): number {
+  const { s, hero, villains, toCall } = ctx;
+  const allIn = toCall >= hero.stack;
+  const pending = villains.map((v, i) => i).filter((i) => !villains[i].allIn && villains[i].committedStreet < s.currentBet);
+  if (!pending.length) {
+    const R = realization(ctx, allIn || villains.every((v) => v.allIn));
+    return R * eqAll * (s.pot + toCall) - toCall;
+  }
+  const heroTo = hero.committedStreet + toCall;
+  const resp = pending.map((i) => {
+    const v = villains[i];
+    const callAmt = Math.max(0, Math.min(s.currentBet, v.committedStreet + v.stack) - v.committedStreet);
+    const ratio = callAmt / Math.max(1, s.pot + toCall);
+    const base = ctx.preflop ? (ctx.raises <= 1 ? ctx.profiles[i].stat("callOpen") + ctx.profiles[i].stat("threeBet") : 0.3) : 1 - ctx.profiles[i].foldToBet(s.street as "flop");
+    return { i, callAmt, ...respondToBet(ctx.ranges[i], s.board, ctx.profiles[i], ratio, Math.min(0.9, base)) };
+  });
+  let ev = 0;
+  for (let mask = 0; mask < 1 << resp.length; mask++) {
+    let prob = 1;
+    for (let k = 0; k < resp.length; k++) prob *= mask & (1 << k) ? 1 - resp[k].fold : resp[k].fold;
+    if (prob < 1e-4) continue;
+    const ranges = villains.map((_, i) => {
+      const k = resp.findIndex((r) => r.i === i);
+      if (k < 0) return ctx.ranges[i];
+      return mask & (1 << k) ? resp[k].continuing : null;
+    });
+    const live = ranges.filter((r): r is Range => r !== null);
+    const extra = resp.reduce((sum, r, k) => sum + (mask & (1 << k) ? Math.min(r.callAmt, Math.max(0, heroTo - villains[r.i].committedStreet)) : 0), 0);
+    const eq = live.length === villains.length ? eqAll : equityVs(ctx, live, 101 + mask);
+    const R = realization(ctx, allIn);
+    ev += prob * (R * eq * (s.pot + toCall + extra) - toCall);
+  }
+  return ev;
+}
+
+function buildOptions(ctx: Ctx, eqAll: number): AdviceOption[] {
+  const { s, hero, toCall } = ctx;
+  const out: AdviceOption[] = [];
+  const maxTo = hero.committedStreet + hero.stack;
+  const allInNow = (added: number) => added >= hero.stack;
+
+  // Passive options.
+  if (toCall <= 0) {
+    out.push({ action: "check", added: 0, allIn: false, ev: checkEV(ctx, eqAll), label: "Check" });
+  } else {
+    out.push({ action: "fold", added: 0, allIn: false, ev: 0, label: "Fold" });
+    const limp = ctx.preflop && ctx.raises === 0;
+    const label = allInNow(toCall)
+      ? `Call all-in (${toCall})`
+      : limp
+        ? hero.position === "SB" && s.currentBet - hero.committedStreet < ctx.bb ? `Complete ${toCall}` : `Limp ${toCall}`
+        : `Call ${toCall}`;
+    out.push({ action: "call", added: toCall, allIn: allInNow(toCall), ev: callEV(ctx, eqAll), label });
+  }
+
+  // Aggressive options.
+  const canRaise = hero.stack > toCall && ctx.villains.some((v) => !v.allIn && v.stack > 0);
+  if (!canRaise) return out;
+  const minTo = s.currentBet > 0 ? s.currentBet + Math.max(s.lastRaiseSize, ctx.bb) : ctx.bb;
+  const targets = new Set<number>();
+  for (const t of sizeTargets(ctx)) {
+    const to = Math.round(Math.min(maxTo, Math.max(minTo, t)));
+    if (to > s.currentBet) targets.add(to);
+  }
+  targets.add(maxTo);
+  // Bets within ~12% of all-in: just shove instead.
+  for (const t of [...targets]) if (t !== maxTo && maxTo - t < 0.12 * maxTo) targets.delete(t);
+
+  const biggestVillain = Math.max(...ctx.villains.map((v) => v.committedStreet + v.stack));
+  for (const to of [...targets].sort((a, b) => a - b)) {
+    const o = aggressiveEV(ctx, to);
+    // Fold estimates for bets far beyond pot size are extrapolations: demand a margin.
+    const risk = Math.min(to, biggestVillain) - hero.committedStreet;
+    const overPot = Math.max(0, risk - (s.pot + toCall));
+    // Mild risk aversion: near-ties go to the smaller, more robust size.
+    o.ev -= 0.015 * Math.max(0, risk) + 0.04 * overPot;
+    const action: AdviceAction = s.currentBet > 0 ? "raise" : "bet";
+    const isAllIn = to >= maxTo;
+    const sizeNote = ctx.preflop ? `${fmt(to / ctx.bb)} BB` : `${Math.round(((to - s.currentBet) / Math.max(1, s.pot + toCall)) * 100)}% pot`;
+    out.push({
+      action,
+      toTotal: to,
+      added: to - hero.committedStreet,
+      allIn: isAllIn,
+      ev: o.ev,
+      foldProb: o.foldProb,
+      equityWhenCalled: o.eqCalled,
+      label: isAllIn ? `All-in (${to})` : `${action === "bet" ? "Bet" : "Raise to"} ${to} (${sizeNote})`,
+    });
+  }
+  return out;
+}
+
+/** Candidate "to" amounts for bets and raises in this spot. */
+function sizeTargets(ctx: Ctx): number[] {
+  const { s, bb } = ctx;
+  if (ctx.preflop) {
+    if (ctx.raises === 0) {
+      const limpers = s.actions.filter((a) => a.street === "preflop" && a.type === "call").length;
+      if (limpers > 0) return [bb * (3.5 + limpers), bb * (4.5 + limpers)];
+      const open = ctx.hero.position === "SB" && !ctx.headsUp ? 3 : 2.5;
+      return [bb * open, bb * (open + 1)];
+    }
+    const mult = ctx.heroInPosition ? 3 : 3.8;
+    return [s.currentBet * mult, s.currentBet * (mult + 1)];
+  }
+  const potAfterCall = s.pot + ctx.toCall;
+  if (s.currentBet === 0) return [0.33, 0.5, 0.75, 1, 1.5].map((f) => f * s.pot);
+  // Raises: "to" = current bet + fraction of the pot after calling.
+  return [0.75, 1.1].map((f) => s.currentBet + f * potAfterCall);
+}
+
+function checkEV(ctx: Ctx, eqAll: number): number {
+  const { s } = ctx;
+  if (s.street === "river" && ctx.heroInPosition) return eqAll * s.pot; // checks down
+  // Checking gives villains a free card or a chance to bet us off our equity.
+  const R = ctx.preflop ? 0.85 : ctx.heroInPosition ? 0.93 : 0.82;
+  return R * eqAll * s.pot;
+}
+
+interface AggResult {
+  ev: number;
+  foldProb: number;
+  eqCalled: number;
+}
+
+function aggressiveEV(ctx: Ctx, to: number): AggResult {
+  const { s, hero, villains } = ctx;
+  const added = to - hero.committedStreet;
+  // Size of the bet a villain faces relative to the pot before it (what they see as "x% pot").
+  const ratioFor = (v: PlayerState) => {
+    const capTo = Math.min(to, v.committedStreet + v.stack);
+    const callAmt = Math.max(0, capTo - v.committedStreet);
+    const potBeforeBet = s.pot + (capTo - hero.committedStreet) - callAmt;
+    return callAmt / Math.max(1, potBeforeBet);
+  };
+
+  const resp = villains.map((v, i) => {
+    if (v.allIn || v.stack === 0) return { fold: 0, continuing: ctx.ranges[i], raising: new Range(), canAct: false };
+    const r = respondToBet(ctx.ranges[i], s.board, ctx.profiles[i], ratioFor(v), baseContinue(ctx, i));
+    return { ...r, canAct: true };
+  });
+
+  // Enumerate which villains continue (independence assumption).
+  const n = villains.length;
+  let ev = 0;
+  let allFold = 1;
+  let eqCalledSum = 0;
+  let eqCalledW = 0;
+  for (let mask = 0; mask < 1 << n; mask++) {
+    let prob = 1;
+    for (let i = 0; i < n; i++) prob *= mask & (1 << i) ? 1 - resp[i].fold : resp[i].fold;
+    if (prob < 1e-4) continue;
+    if (mask === 0) {
+      allFold = prob;
+      ev += prob * s.pot;
+      continue;
+    }
+    const callers = villains.map((v, i) => i).filter((i) => mask & (1 << i));
+    // Hero can only lose what the biggest caller can match.
+    const cap = Math.max(...callers.map((i) => villains[i].committedStreet + villains[i].stack));
+    const heroTo = Math.min(to, cap);
+    const heroAdded = heroTo - hero.committedStreet;
+    const callerAdds = callers.reduce((sum, i) => sum + Math.max(0, Math.min(heroTo, villains[i].committedStreet + villains[i].stack) - villains[i].committedStreet), 0);
+    const finalPot = s.pot + heroAdded + callerAdds;
+    const heroAllIn = heroAdded >= hero.stack;
+    const everyoneAllIn = heroAllIn || callers.every((i) => villains[i].committedStreet + villains[i].stack <= heroTo);
+    const R = realization(ctx, everyoneAllIn);
+
+    let scenarioEV: number;
+    if (callers.length === 1 && resp[callers[0]].canAct && !everyoneAllIn) {
+      // Single caller who might raise back.
+      const i = callers[0];
+      const v = villains[i];
+      const contW = resp[i].continuing.size();
+      const raiseW = Math.min(contW, resp[i].raising.size());
+      const pRaise = contW > 0 ? raiseW / contW : 0;
+      const flatRange = new Range(Float64Array.from(resp[i].continuing.w, (w, k) => Math.max(0, w - resp[i].raising.w[k])));
+      const eqFlat = flatRange.size() > 1e-6 ? equityVs(ctx, [flatRange], mask * 13 + to) : 0.5;
+      const callEV = R * eqFlat * finalPot - heroAdded;
+      let raisedEV = -heroAdded;
+      if (pRaise > 0.01) {
+        const villainMax = v.committedStreet + v.stack;
+        const reraiseTo = Math.min(villainMax, Math.max(heroTo * 3, heroTo + s.pot));
+        const jam = reraiseTo >= villainMax * 0.6 ? villainMax : reraiseTo;
+        const heroTotal = Math.min(jam, hero.committedStreet + hero.stack);
+        const eqVsRaise = equityVs(ctx, [resp[i].raising], mask * 17 + to);
+        const potIfCalled = s.pot + (heroTotal - hero.committedStreet) + (Math.min(heroTotal, villainMax) - v.committedStreet);
+        const Rr = realization(ctx, heroTotal >= hero.committedStreet + hero.stack || jam >= villainMax);
+        raisedEV = Math.max(-heroAdded, Rr * eqVsRaise * potIfCalled - (heroTotal - hero.committedStreet));
+      }
+      scenarioEV = (1 - pRaise) * callEV + pRaise * raisedEV;
+      eqCalledSum += prob * eqFlat;
+    } else {
+      const eq = equityVs(ctx, callers.map((i) => resp[i].continuing), mask * 19 + to);
+      scenarioEV = R * eq * finalPot - heroAdded;
+      eqCalledSum += prob * eq;
+    }
+    eqCalledW += prob;
+    ev += prob * scenarioEV;
+  }
+  return { ev, foldProb: allFold, eqCalled: eqCalledW > 0 ? eqCalledSum / eqCalledW : 0 };
+}
+
+function likelyClasses(range: Range, strengths: Float64Array): string[] {
+  const agg = new Map<string, { w: number; n: number; st: number }>();
+  for (let i = 0; i < NUM_COMBOS; i++) {
+    const w = range.w[i];
+    if (w <= 0) continue;
+    const [a, b] = COMBO_CARDS[i];
+    const c = classOf(a, b);
+    const e = agg.get(c) ?? { w: 0, n: 0, st: 0 };
+    e.w += w;
+    e.n++;
+    e.st += strengths[i] * w;
+    agg.set(c, e);
+  }
+  const rows = [...agg.entries()].map(([c, e]) => ({ c, avg: e.w / e.n, st: e.st / e.w }));
+  const maxAvg = Math.max(0, ...rows.map((r) => r.avg));
+  if (rows.length > 120 && rows.every((r) => r.avg > 0.9 * maxAvg)) return ["any two cards"];
+  return rows
+    .filter((r) => r.avg >= 0.5 * maxAvg)
+    .sort((x, y) => y.st - x.st)
+    .slice(0, 8)
+    .map((r) => r.c);
+}
+
+function explain(ctx: Ctx, best: AdviceOption, options: AdviceOption[], eqAll: number, potOdds: number): string[] {
+  const reasons: string[] = [];
+  const names = ctx.villains.map((v) => v.name).join(" & ");
+  reasons.push(`Win chance ${pct(eqAll)} vs ${names}'s likely hands`);
+  if (ctx.toCall > 0 && !(ctx.preflop && ctx.raises === 0)) reasons.push(`Calling ${ctx.toCall} into ${ctx.s.pot} needs ${pct(potOdds)}`);
+  if (ctx.preflop) {
+    const cls = classOf(ctx.heroCards[0], ctx.heroCards[1]);
+    const rank = preflopScores().get(cls) ?? 0;
+    reasons.push(`${cls} is a top ${pct(1 - rank + 0.005)} starting hand`);
+  }
+  if (best.action === "bet" || best.action === "raise") {
+    if (best.foldProb !== undefined) reasons.push(`They fold about ${pct(best.foldProb)} of the time to this size`);
+    const eqc = best.equityWhenCalled;
+    if (eqc !== undefined) {
+      if (ctx.preflop) reasons.push(`When called you have ${pct(eqc)} equity${ctx.heroInPosition ? " and position" : ""}`);
+      else if (eqc >= 0.5) reasons.push(`Value: ${pct(eqc)} vs the hands that call`);
+      else if (eqc >= 0.25) reasons.push(`Semi-bluff: ${pct(eqc)} when called, plus fold equity`);
+      else reasons.push(`Bluff: profit comes from folds (${pct(eqc)} when called)`);
+    }
+  }
+  for (let i = 0; i < ctx.villains.length; i++) {
+    const p = ctx.profiles[i];
+    if (p.hands < 10) continue;
+    const street = ctx.s.street;
+    const f = ctx.preflop ? null : p.foldToBet(street as "flop");
+    if (f !== null && (f > 0.6 || f < 0.3)) reasons.push(`${p.name} folds to ${street} bets ${pct(f)} (${p.style})`);
+    else if (p.style !== "balanced" && !p.style.startsWith("unknown")) reasons.push(`${p.name}: ${p.style}`);
+  }
+  const second = options.find((o) => o !== best);
+  if (second) reasons.push(`EV ${best.ev >= 0 ? "+" : ""}${fmt(best.ev)} vs ${second.label.toLowerCase()} ${second.ev >= 0 ? "+" : ""}${fmt(second.ev)}`);
+  return reasons;
+}
