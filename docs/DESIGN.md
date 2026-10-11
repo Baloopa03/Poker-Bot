@@ -145,6 +145,17 @@ Then pick one of two approaches:
   the connection and open its **Messages** tab for a few hands. If nothing
   appears under Socket, check **All** for `eventsource`, long-polling
   (`socket.io/?EIO=`, Firebase `.lp?`) or WebRTC.
+- **Third capture (screenshots, 2026-10-11): the transport is socket.io.**
+  The game page is `pokerpatio.com/mp?game=<lobby id>`, loaded by
+  `mp_bundle.js`, and it opens `socket.io/?EIO=4&transport=…` (Engine.IO v4 /
+  Socket.IO v5). Game events should therefore look like
+  `42["eventName", {...}]`. The DevTools Messages list was empty after one
+  hand, though. Either the panel wasn't showing frames, or the traffic went
+  over long-polling (XHR) or a worker.
+- To capture reliably without DevTools, `tools/recorder/` is a tiny
+  extension that wraps `WebSocket` and the socket.io XHR at `document_start`,
+  decodes Engine.IO/Socket.IO packets, redacts credential-like keys and
+  saves a JSON capture. The real Adapter (approach A) will reuse this tap.
 - Telemetry is a backup signal at best. Never rely on it for game state.
 
 Either way the Adapter outputs neutral events (`HandStarted`, `HoleCards`,
