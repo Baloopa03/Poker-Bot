@@ -157,3 +157,15 @@ describe("tracker: positions at bigger tables", () => {
     expect(Object.fromEntries(t.state.players.map((p) => [p.name, p.position]))).toEqual({ A: "UTG", B: "MP", C: "CO", D: "BTN", E: "SB", F: "BB" });
   });
 });
+
+describe("tracker: real show-hand capture", () => {
+  it("picks up a hand shown after folding, but not our own show", () => {
+    const capture = JSON.parse(readFileSync("tests/fixtures/pokerpatio/heads-up-show-hand.json", "utf8"));
+    const t = new Tracker();
+    const shown: string[] = [];
+    t.on("handShown", ({ history, key }) => shown.push(`${history.players.find((p) => p.key === key)!.name} ${cardsToString(history.result!.shown[key])}`));
+    for (const e of capture.entries) t.handle(e);
+    expect(shown).toEqual(["showhand 8h 5s"]);
+    expect(cardsToString(t.state.heroCards)).toBe("Th Tc"); // next hand dealt normally
+  });
+});

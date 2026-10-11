@@ -246,6 +246,10 @@ export class Tracker {
   private onEvent(ev: string, a: Any): void {
     const s = this.state;
     switch (ev) {
+      case "room:player_username_updated":
+        this.learn(a?.username, a?.userId);
+        break;
+
       case "room:get":
         for (const u of Object.values<Any>(a?.data?.players ?? {})) this.learn(u.username, u.userId);
         break;
@@ -392,6 +396,18 @@ export class Tracker {
       case "pss":
         this.stackEdited(log.pid, log.amt);
         break;
+      case "shc": {
+        // "<name> shows [8h 5s]": backup for cards shown after the hand.
+        const p = this.playerByKey(this.keyFor(log.nick ?? "", log.pid));
+        if (p && Array.isArray(log.cds) && p.cards.length < 2) {
+          for (const t of log.cds) {
+            const c = parseCard(String(t));
+            if (!p.cards.includes(c)) p.cards.push(c);
+          }
+          this.maybeLateShow(p);
+        }
+        break;
+      }
       case "hei":
         this.serverPot = log.tp;
         break;
