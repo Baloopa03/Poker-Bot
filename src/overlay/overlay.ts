@@ -44,6 +44,9 @@ tr.best td { color: #81c995; font-weight: 700; }
 .pos { color: #81c995; } .neg { color: #f28b82; }
 .villain { margin: 4px 0; }
 .row { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #9aa0a6; margin-bottom: 8px; cursor: pointer; }
+.scroll { overflow-x: auto; }
+select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-radius: 4px; font: inherit; font-size: 11px; max-width: 90px; }
 `;
 
 const SUIT_CLASS = ["c", "d", "h", "s"];
@@ -63,6 +66,9 @@ function cardHtml(cards: readonly Card[]): string {
 export interface OverlayActions {
   resetLedger(): void;
   saveCapture(): void;
+  setUseReads(on: boolean): void;
+  /** Merge profile `fromKey` into `intoKey` (same mate, different account). */
+  merge(fromKey: string, intoKey: string): void;
 }
 
 export class Overlay {
@@ -71,6 +77,7 @@ export class Overlay {
   private tab = "advice";
   private advice: Advice | null = null;
   private thinking = false;
+  private useReads = true;
 
   constructor(private readonly actions: OverlayActions) {
     const host = document.createElement("div");
@@ -100,6 +107,18 @@ export class Overlay {
       if (act === "min") this.panel.classList.toggle("min");
       if (act === "reset" && confirm("Reset the ledger for this lobby?")) this.actions.resetLedger();
       if (act === "capture") this.actions.saveCapture();
+    });
+    this.root.addEventListener("change", (e) => {
+      const t = e.target as HTMLInputElement | HTMLSelectElement;
+      if (t.dataset.act === "reads") this.actions.setUseReads((t as HTMLInputElement).checked);
+      if (t.dataset.act === "merge" && t.value) {
+        const from = t.dataset.key!;
+        const fromName = t.dataset.name!;
+        const intoName = (t as HTMLSelectElement).selectedOptions[0]?.textContent ?? t.value;
+        if (confirm(`Merge ${fromName} into ${intoName}? Their history is combined and future hands from either account count as ${intoName}. This can't be undone.`))
+          this.actions.merge(from, t.value);
+        else t.value = "";
+      }
     });
     window.addEventListener("keydown", (e) => {
       if (e.altKey && e.key.toLowerCase() === "b") this.panel.classList.toggle("min");
@@ -151,6 +170,10 @@ export class Overlay {
     this.advice = a;
   }
 
+  setUseReads(on: boolean): void {
+    this.useReads = on;
+  }
+
   render(s: TableState, model: OpponentModel, ledger: LedgerEntry[]): void {
     this.setStatus(s.handActive ? `hand ${s.handNumber} · ${s.street} · ${s.sb}/${s.bb}${s.paused ? " · paused" : ""}` : s.players.length ? "between hands" : "waiting for game…");
     this.renderAdvice(s);
@@ -162,7 +185,8 @@ export class Overlay {
     const hero = s.players.find((p) => p.seat === s.heroSeat);
     const heroTurn = !!hero && s.toActSeat === s.heroSeat;
     const a = heroTurn ? this.advice : null;
-    let html = "";
+    let html = `<label class="toggle" title="Off: ignore what's been learned about your mates and treat everyone as a typical player">
+      <input type="checkbox" data-act="reads" ${this.useReads ? "checked" : ""}> Use reads on mates</label>`;
     if (s.heroCards.length) html += `<div class="cards">${cardHtml(s.heroCards)}</div>`;
     html += `<div class="board">${s.board.length ? `Board ${cardHtml(s.board)}` : s.handActive ? "Preflop" : ""}${s.handActive ? ` · Pot ${s.pot}` : ""}</div>`;
 
@@ -184,14 +208,21 @@ export class Overlay {
       html += a.villains
         .map((v) => `<div class="villain"><b>${esc(v.name)}</b> <span class="muted">${v.position ?? ""} · top ${pct(v.rangeWidth)} · ${esc(v.style)}</span><br><span class="muted">${esc(v.likely.join(" "))}</span></div>`)
         .join("");
-      if (!a.confident) html += `<div class="muted">Reads are still mostly default assumptions; they sharpen as hands are played.</div>`;
+      if (!a.usedReads) html += `<div class="muted">Reads off: advice assumes typical opponents.</div>`;
+      else if (!a.confident) html += `<div class="muted">Reads are still mostly default assumptions; they sharpen as hands are played.</div>`;
     }
     this.pane("advice").innerHTML = html;
   }
 
   private renderPlayers(s: TableState, model: OpponentModel): void {
-    const keys = s.players.filter((p) => p.seat !== s.heroSeat).map((p) => p.key);
-    for (const p of model.players.values()) if (!keys.includes(p.key) && p.key !== s.heroKey) keys.push(p.key);
+    const heroKey = s.heroKey ? model.resolve(s.heroKey) : undefined;
+    const keys: string[] = [];
+    const add = (k: string) => {
+      const r = model.resolve(k);
+      if (r !== heroKey && !keys.includes(r)) keys.push(r);
+    };
+    for (const p of s.players) if (p.seat !== s.heroSeat) add(p.key);
+    for (const p of model.players.values()) add(p.key);
     const rows: Array<[string, StatName]> = [
       ["VPIP", "vpip"],
       ["Raise preflop", "pfr"],
@@ -212,7 +243,10 @@ export class Overlay {
       return;
     }
     const profiles = keys.map((k) => model.profile(k, s.players.find((p) => p.key === k)?.name ?? k));
-    let html = `<table><tr><th></th>${profiles.map((p) => `<th>${esc(p.name)}</th>`).join("")}</tr>`;
+    const aka = (k: string) => model.players.get(k)?.aliasNames?.filter(Boolean) ?? [];
+    let html = `<div class="scroll"><table><tr><th></th>${profiles
+      .map((p) => `<th>${esc(p.name)}${aka(p.key).length ? `<br><span class="muted">aka ${esc(aka(p.key).join(", "))}</span>` : ""}</th>`)
+      .join("")}</tr>`;
     html += `<tr><td>Hands</td>${profiles.map((p) => `<td>${p.hands}</td>`).join("")}</tr>`;
     for (const [label, stat] of rows)
       html += `<tr><td>${label}</td>${profiles
@@ -221,8 +255,16 @@ export class Overlay {
           return `<td title="${n} samples">${pct(p.stat(stat))}${n < 5 ? "*" : ""}</td>`;
         })
         .join("")}</tr>`;
-    html += `<tr><td>Style</td>${profiles.map((p) => `<td>${esc(p.style.split(" (")[0])}</td>`).join("")}</tr></table>`;
-    html += `<div class="muted">* fewer than 5 samples: mostly the default assumption.</div>`;
+    html += `<tr><td>Style</td>${profiles.map((p) => `<td>${esc(p.style.split(" (")[0])}</td>`).join("")}</tr>`;
+    html += `<tr><td>Same person as…</td>${profiles
+      .map(
+        (p) => `<td><select data-act="merge" data-key="${esc(p.key)}" data-name="${esc(p.name)}"><option value="">–</option>${profiles
+          .filter((o) => o.key !== p.key)
+          .map((o) => `<option value="${esc(o.key)}">${esc(o.name)}</option>`)
+          .join("")}</select></td>`,
+      )
+      .join("")}</tr></table></div>`;
+    html += `<div class="muted">* fewer than 5 samples: mostly the default assumption. Profiles follow each account, so a new name on the same account is recognised automatically; use "Same person as…" when a mate plays from a different account or device.</div>`;
     this.pane("players").innerHTML = html;
   }
 

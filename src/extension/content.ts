@@ -7,6 +7,7 @@ import { Overlay } from "../overlay/overlay";
 import { Tracker } from "../tracker/tracker";
 
 const MODEL_KEY = "pb:model";
+const SETTINGS_KEY = "pb:settings";
 const LEDGER_PREFIX = "pb:ledger:";
 const LEDGER_MAX_AGE_MS = 16 * 3600 * 1000;
 const CAPTURE_LIMIT = 20000;
@@ -16,6 +17,7 @@ let model = new OpponentModel();
 const capture: Packet[] = [];
 const started = Date.now();
 let ledgerRestored = false;
+let useReads = true;
 
 const overlay = new Overlay({
   resetLedger() {
@@ -34,12 +36,29 @@ const overlay = new Overlay({
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   },
+  setUseReads(on) {
+    useReads = on;
+    overlay.setUseReads(on);
+    storage?.set({ [SETTINGS_KEY]: { useReads } });
+    recomputeAdvice();
+  },
+  merge(fromKey, intoKey) {
+    model.merge(fromKey, intoKey);
+    saveModel();
+    recomputeAdvice();
+    render();
+  },
 });
 
 const storage = typeof chrome !== "undefined" ? chrome.storage?.local : undefined;
 
-storage?.get(MODEL_KEY).then((v) => {
+storage?.get([MODEL_KEY, SETTINGS_KEY]).then((v) => {
   if (v[MODEL_KEY]) model = OpponentModel.fromJSON(v[MODEL_KEY]);
+  const settings = v[SETTINGS_KEY] as { useReads?: boolean } | undefined;
+  if (settings?.useReads === false) {
+    useReads = false;
+    overlay.setUseReads(false);
+  }
   render();
 });
 
@@ -72,7 +91,9 @@ function render(): void {
 }
 
 let adviceToken = 0;
-tracker.on("heroTurn", () => {
+function recomputeAdvice(): void {
+  const s = tracker.state;
+  if (!s.heroSeat || s.toActSeat !== s.heroSeat) return;
   const token = ++adviceToken;
   overlay.setAdvice(null);
   overlay.setThinking(true);
@@ -81,14 +102,15 @@ tracker.on("heroTurn", () => {
   setTimeout(() => {
     if (token !== adviceToken) return;
     try {
-      overlay.setAdvice(advise(tracker.state, model));
+      overlay.setAdvice(advise(tracker.state, model, { useReads }));
     } catch (e) {
       console.warn("[poker-bot] advice failed", e);
     }
     overlay.setThinking(false);
     render();
   }, 30);
-});
+}
+tracker.on("heroTurn", recomputeAdvice);
 
 tracker.on("handComplete", (h) => {
   model.update(h);

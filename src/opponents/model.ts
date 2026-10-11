@@ -54,6 +54,8 @@ export interface PlayerStats {
   name: string;
   hands: number;
   counts: Partial<Record<StatName, [hits: number, opportunities: number]>>;
+  /** Other names this mate has played under (from merges). */
+  aliasNames?: string[];
 }
 
 export interface Profile {
@@ -71,14 +73,50 @@ const POSTFLOP: Street[] = ["flop", "turn", "river"];
 
 export class OpponentModel {
   readonly players = new Map<string, PlayerStats>();
+  /** Merged accounts: alias key → the profile it now feeds. */
+  readonly aliases = new Map<string, string>();
 
   static fromJSON(data: unknown): OpponentModel {
     const m = new OpponentModel();
-    if (Array.isArray(data)) for (const p of data as PlayerStats[]) if (p?.key) m.players.set(p.key, p);
+    // v1 stored a bare array of players; v2 stores { players, aliases }.
+    const d = data as { players?: PlayerStats[]; aliases?: Record<string, string> } | PlayerStats[] | null;
+    const players = Array.isArray(d) ? d : (d?.players ?? []);
+    for (const p of players) if (p?.key) m.players.set(p.key, p);
+    if (!Array.isArray(d)) for (const [a, b] of Object.entries(d?.aliases ?? {})) m.aliases.set(a, b);
     return m;
   }
-  toJSON(): PlayerStats[] {
-    return [...this.players.values()];
+  toJSON(): { players: PlayerStats[]; aliases: Record<string, string> } {
+    return { players: [...this.players.values()], aliases: Object.fromEntries(this.aliases) };
+  }
+
+  /** The profile key a player's hands are recorded under (follows merges). */
+  resolve(key: string): string {
+    let k = key;
+    for (let i = 0; i < 10 && this.aliases.has(k); i++) k = this.aliases.get(k)!;
+    return k;
+  }
+
+  /**
+   * Merge `fromKey`'s history into `intoKey` (same mate, different account or
+   * device). Future hands from either account go to `intoKey`.
+   */
+  merge(fromKey: string, intoKey: string): void {
+    const from = this.resolve(fromKey);
+    const into = this.resolve(intoKey);
+    if (from === into) return;
+    const a = this.players.get(from);
+    const b = this.stats(into, this.players.get(into)?.name ?? into);
+    if (a) {
+      b.hands += a.hands;
+      for (const [stat, [hits, opps]] of Object.entries(a.counts) as Array<[StatName, [number, number]]>) {
+        const c = (b.counts[stat] ??= [0, 0]);
+        c[0] += hits;
+        c[1] += opps;
+      }
+      b.aliasNames = [...new Set([...(b.aliasNames ?? []), a.name, ...(a.aliasNames ?? [])])].filter((n) => n !== b.name);
+      this.players.delete(from);
+    }
+    this.aliases.set(from, into);
   }
 
   private stats(key: string, name: string): PlayerStats {
@@ -87,7 +125,11 @@ export class OpponentModel {
       s = { key, name, hands: 0, counts: {} };
       this.players.set(key, s);
     }
-    s.name = name;
+    if (s.name !== name) {
+      // Remember the previous display name so the mate stays recognisable.
+      s.aliasNames = [...new Set([...(s.aliasNames ?? []), s.name])].filter((n) => n !== name);
+      s.name = name;
+    }
     return s;
   }
 
@@ -98,6 +140,7 @@ export class OpponentModel {
   }
 
   profile(key: string, name = key): Profile {
+    key = this.resolve(key);
     const s = this.players.get(key) ?? { key, name, hands: 0, counts: {} };
     const stat = (n: StatName): number => {
       const [mean, k] = PRIORS[n];
@@ -129,8 +172,28 @@ export class OpponentModel {
     };
   }
 
+  private resolveHistory(h: HandHistory): HandHistory {
+    if (!this.aliases.size) return h;
+    const r = (k: string) => this.resolve(k);
+    const remap = <T>(o: Record<string, T>) => Object.fromEntries(Object.entries(o).map(([k, v]) => [r(k), v]));
+    return {
+      ...h,
+      heroKey: h.heroKey && r(h.heroKey),
+      players: h.players.map((p) => ({ ...p, key: r(p.key) })),
+      actions: h.actions.map((a) => ({ ...a, key: r(a.key) })),
+      result: h.result && {
+        ...h.result,
+        won: remap(h.result.won),
+        refunded: remap(h.result.refunded),
+        shown: remap(h.result.shown),
+        descriptions: remap(h.result.descriptions),
+      },
+    };
+  }
+
   /** Learn from one finished hand. */
-  update(h: HandHistory): void {
+  update(hand: HandHistory): void {
+    const h = this.resolveHistory(hand);
     const pos = new Map<string, Position | undefined>(h.players.map((p) => [p.key, p.position]));
     const stats = new Map(h.players.map((p) => [p.key, this.stats(p.key, p.name)]));
     for (const s of stats.values()) s.hands++;

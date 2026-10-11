@@ -2,7 +2,7 @@ import { type Card, cardsToString } from "./cards";
 import { equity, riverEquityExact } from "./equity";
 import { COMBOS as COMBO_CARDS, NUM_COMBOS, Range, classOf } from "./range";
 import { preflopComboStrengths, preflopScores } from "./strength";
-import type { OpponentModel, Profile } from "../opponents/model";
+import { OpponentModel, type Profile } from "../opponents/model";
 import { boardStrengths, estimateRange, rangeWidth, respondToBet } from "../opponents/ranges";
 import type { PlayerState, Position, TableState } from "../tracker/types";
 
@@ -55,11 +55,17 @@ export interface Advice {
   heroCards: string;
   /** False while reads are mostly priors (few hands seen). */
   confident: boolean;
+  usedReads: boolean;
 }
 
 export interface AdvisorOptions {
   iterations?: number;
   seed?: number;
+  /**
+   * false = ignore what's been learned about these players and treat everyone
+   * as a typical player (default assumptions only).
+   */
+  useReads?: boolean;
 }
 
 const POSTFLOP_ORDER: Record<Position, number> = { SB: 0, BB: 1, UTG: 2, MP: 3, CO: 4, BTN: 5 };
@@ -85,7 +91,9 @@ interface Ctx {
   heroWasPreflopAggressor: boolean;
 }
 
-export function advise(s: TableState, model: OpponentModel, opts: AdvisorOptions = {}): Advice | null {
+export function advise(s: TableState, learned: OpponentModel, opts: AdvisorOptions = {}): Advice | null {
+  const useReads = opts.useReads ?? true;
+  const model = useReads ? learned : new OpponentModel();
   const hero = s.players.find((p) => p.seat === s.heroSeat);
   if (!hero || s.heroCards.length !== 2 || hero.folded || !s.handActive || s.street === "showdown") return null;
   if (hero.stack <= 0) return null;
@@ -149,10 +157,11 @@ export function advise(s: TableState, model: OpponentModel, opts: AdvisorOptions
     toCall: ctx.toCall,
     pot: s.pot,
     potOdds,
-    reasons: explain(ctx, best, options, eqAll, potOdds),
+    reasons: useReads ? explain(ctx, best, options, eqAll, potOdds) : ["Reads off: everyone treated as a typical player", ...explain(ctx, best, options, eqAll, potOdds)],
     villains: villainViews,
     heroCards: cardsToString(heroCards),
-    confident: profiles.every((p) => p.hands >= 25),
+    confident: !useReads || profiles.every((p) => p.hands >= 25),
+    usedReads: useReads,
   };
 }
 

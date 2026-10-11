@@ -492,19 +492,255 @@
     return Float64Array.from(CLASS_OF_COMBO, (c) => s.get(c));
   }
 
+  // src/opponents/model.ts
+  var PRIORS = {
+    vpip: [0.5, 12],
+    pfr: [0.22, 12],
+    limp: [0.25, 8],
+    steal: [0.45, 8],
+    foldToSteal: [0.45, 8],
+    threeBet: [0.1, 10],
+    foldTo3Bet: [0.45, 6],
+    callOpen: [0.4, 8],
+    cbet: [0.6, 8],
+    foldToCbet: [0.4, 8],
+    foldToBetFlop: [0.4, 8],
+    foldToBetTurn: [0.42, 8],
+    foldToBetRiver: [0.45, 8],
+    raiseVsBet: [0.1, 10],
+    betWhenCheckedTo: [0.35, 8],
+    wtsd: [0.35, 8],
+    wonAtShowdown: [0.5, 8],
+    bluffShare: [0.3, 6]
+  };
+  var POSTFLOP = ["flop", "turn", "river"];
+  var OpponentModel = class _OpponentModel {
+    players = /* @__PURE__ */ new Map();
+    /** Merged accounts: alias key → the profile it now feeds. */
+    aliases = /* @__PURE__ */ new Map();
+    static fromJSON(data) {
+      const m = new _OpponentModel();
+      const d = data;
+      const players = Array.isArray(d) ? d : d?.players ?? [];
+      for (const p of players) if (p?.key) m.players.set(p.key, p);
+      if (!Array.isArray(d)) for (const [a, b] of Object.entries(d?.aliases ?? {})) m.aliases.set(a, b);
+      return m;
+    }
+    toJSON() {
+      return { players: [...this.players.values()], aliases: Object.fromEntries(this.aliases) };
+    }
+    /** The profile key a player's hands are recorded under (follows merges). */
+    resolve(key) {
+      let k = key;
+      for (let i = 0; i < 10 && this.aliases.has(k); i++) k = this.aliases.get(k);
+      return k;
+    }
+    /**
+     * Merge `fromKey`'s history into `intoKey` (same mate, different account or
+     * device). Future hands from either account go to `intoKey`.
+     */
+    merge(fromKey, intoKey) {
+      const from = this.resolve(fromKey);
+      const into = this.resolve(intoKey);
+      if (from === into) return;
+      const a = this.players.get(from);
+      const b = this.stats(into, this.players.get(into)?.name ?? into);
+      if (a) {
+        b.hands += a.hands;
+        for (const [stat, [hits, opps]] of Object.entries(a.counts)) {
+          const c = b.counts[stat] ??= [0, 0];
+          c[0] += hits;
+          c[1] += opps;
+        }
+        b.aliasNames = [.../* @__PURE__ */ new Set([...b.aliasNames ?? [], a.name, ...a.aliasNames ?? []])].filter((n) => n !== b.name);
+        this.players.delete(from);
+      }
+      this.aliases.set(from, into);
+    }
+    stats(key, name) {
+      let s = this.players.get(key);
+      if (!s) {
+        s = { key, name, hands: 0, counts: {} };
+        this.players.set(key, s);
+      }
+      if (s.name !== name) {
+        s.aliasNames = [.../* @__PURE__ */ new Set([...s.aliasNames ?? [], s.name])].filter((n) => n !== name);
+        s.name = name;
+      }
+      return s;
+    }
+    bump(s, stat, hit) {
+      const c = s.counts[stat] ??= [0, 0];
+      c[1]++;
+      if (hit) c[0]++;
+    }
+    profile(key, name = key) {
+      key = this.resolve(key);
+      const s = this.players.get(key) ?? { key, name, hands: 0, counts: {} };
+      const stat = (n) => {
+        const [mean, k] = PRIORS[n];
+        const [hits, opps] = s.counts[n] ?? [0, 0];
+        return (hits + mean * k) / (opps + k);
+      };
+      const foldToBet = (street) => street === "turn" ? stat("foldToBetTurn") : street === "river" ? stat("foldToBetRiver") : stat("foldToBetFlop");
+      const vpip = stat("vpip");
+      const pfr = stat("pfr");
+      const fold = (stat("foldToBetFlop") + stat("foldToBetTurn") + stat("foldToBetRiver")) / 3;
+      let style = "unknown (few hands)";
+      if (s.hands >= 15) {
+        if (vpip > 0.6 && fold < 0.35) style = "calling station";
+        else if (vpip > 0.55 && pfr > 0.35) style = "maniac";
+        else if (vpip < 0.3) style = pfr > 0.18 ? "tight-aggressive" : "nit";
+        else if (pfr / vpip > 0.6) style = "loose-aggressive";
+        else if (pfr / vpip < 0.35) style = "loose-passive";
+        else style = "balanced";
+      }
+      return {
+        key,
+        name: s.name ?? name,
+        hands: s.hands,
+        stat,
+        raw: (n) => s.counts[n] ?? [0, 0],
+        foldToBet,
+        style
+      };
+    }
+    resolveHistory(h) {
+      if (!this.aliases.size) return h;
+      const r = (k) => this.resolve(k);
+      const remap = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [r(k), v]));
+      return {
+        ...h,
+        heroKey: h.heroKey && r(h.heroKey),
+        players: h.players.map((p) => ({ ...p, key: r(p.key) })),
+        actions: h.actions.map((a) => ({ ...a, key: r(a.key) })),
+        result: h.result && {
+          ...h.result,
+          won: remap(h.result.won),
+          refunded: remap(h.result.refunded),
+          shown: remap(h.result.shown),
+          descriptions: remap(h.result.descriptions)
+        }
+      };
+    }
+    /** Learn from one finished hand. */
+    update(hand) {
+      const h = this.resolveHistory(hand);
+      const pos = new Map(h.players.map((p) => [p.key, p.position]));
+      const stats = new Map(h.players.map((p) => [p.key, this.stats(p.key, p.name)]));
+      for (const s of stats.values()) s.hands++;
+      const pre = h.actions.filter((a) => a.street === "preflop" && a.type !== "post");
+      let raises = 0;
+      let opener;
+      let lastRaiser;
+      const acted = /* @__PURE__ */ new Set();
+      const vpip = /* @__PURE__ */ new Set();
+      const pfr = /* @__PURE__ */ new Set();
+      for (const a of pre) {
+        const s = stats.get(a.key);
+        if (!s) continue;
+        const first = !acted.has(a.key);
+        acted.add(a.key);
+        const aggressive = a.type === "raise" || a.type === "bet";
+        if (a.type === "call" || aggressive) vpip.add(a.key);
+        if (aggressive) pfr.add(a.key);
+        if (raises === 0 && first) {
+          const limpOpp = pos.get(a.key) !== "BB";
+          if (limpOpp) this.bump(s, "limp", a.type === "call");
+          const p = pos.get(a.key);
+          if ((p === "BTN" || p === "SB") && pre.slice(0, pre.indexOf(a)).every((x) => x.type === "fold"))
+            this.bump(s, "steal", aggressive);
+        } else if (raises === 1 && a.key !== opener) {
+          this.bump(s, "threeBet", aggressive);
+          if (!aggressive) this.bump(s, "callOpen", a.type === "call");
+          const op = opener ? pos.get(opener) : void 0;
+          const me = pos.get(a.key);
+          if ((op === "BTN" || op === "SB") && (me === "SB" || me === "BB") && first) this.bump(s, "foldToSteal", a.type === "fold");
+        } else if (raises === 2 && a.key === opener) {
+          this.bump(s, "foldTo3Bet", a.type === "fold");
+        }
+        if (aggressive) {
+          raises++;
+          if (raises === 1) opener = a.key;
+          lastRaiser = a.key;
+        }
+      }
+      for (const [key, s] of stats) {
+        if (!acted.has(key)) continue;
+        this.bump(s, "vpip", vpip.has(key));
+        this.bump(s, "pfr", pfr.has(key));
+      }
+      const foldedPre = new Set(pre.filter((a) => a.type === "fold").map((a) => a.key));
+      const sawFlop = h.board.length >= 3 ? [...stats.keys()].filter((k) => !foldedPre.has(k) && h.actions.some((a) => a.key === k)) : [];
+      for (const street of POSTFLOP) {
+        const acts = h.actions.filter((a) => a.street === street);
+        let betSeen = false;
+        let cbetMade = false;
+        for (const a of acts) {
+          const s = stats.get(a.key);
+          if (!s) continue;
+          const aggressive = a.type === "bet" || a.type === "raise";
+          if (!betSeen) {
+            if (street === "flop" && a.key === lastRaiser) this.bump(s, "cbet", aggressive);
+            else this.bump(s, "betWhenCheckedTo", aggressive);
+            if (aggressive && street === "flop" && a.key === lastRaiser) cbetMade = true;
+          } else {
+            const fs = street === "flop" ? "foldToBetFlop" : street === "turn" ? "foldToBetTurn" : "foldToBetRiver";
+            this.bump(s, fs, a.type === "fold");
+            this.bump(s, "raiseVsBet", a.type === "raise");
+            if (cbetMade && street === "flop" && a.key !== lastRaiser) this.bump(s, "foldToCbet", a.type === "fold");
+          }
+          if (aggressive) betSeen = true;
+        }
+      }
+      const shown = h.result?.shown ?? {};
+      const atShowdown = new Set(Object.keys(shown));
+      if (h.heroKey && h.heroCards?.length === 2 && Object.keys(shown).length) atShowdown.add(h.heroKey);
+      for (const k of sawFlop) {
+        const s = stats.get(k);
+        const went = atShowdown.has(k);
+        this.bump(s, "wtsd", went);
+        if (went) this.bump(s, "wonAtShowdown", (h.result?.won[k] ?? 0) > 0);
+      }
+      for (const [key, cards] of Object.entries(shown)) {
+        const s = stats.get(key);
+        if (!s || cards.length !== 2) continue;
+        for (const street of POSTFLOP) {
+          const bets = h.actions.filter((a) => a.key === key && a.street === street && (a.type === "bet" || a.type === "raise"));
+          if (!bets.length) continue;
+          const board = h.board.slice(0, street === "flop" ? 3 : street === "turn" ? 4 : 5);
+          if (board.length < 3) continue;
+          const strength = handStrength(cards, board);
+          for (let i = 0; i < bets.length; i++) this.bump(s, "bluffShare", strength < 0.45);
+        }
+      }
+    }
+  };
+  var strengthCache = /* @__PURE__ */ new Map();
+  function handStrength(cards, board) {
+    const k = board.join(",");
+    let st = strengthCache.get(k);
+    if (!st) {
+      st = comboStrengths(board);
+      if (strengthCache.size > 64) strengthCache.clear();
+      strengthCache.set(k, st);
+    }
+    return st[comboIndex(cards[0], cards[1])];
+  }
+
   // src/opponents/ranges.ts
   var SOFT = 0.045;
   var sigmoid = (x) => 1 / (1 + Math.exp(-x));
   var inTop = (q, frac) => sigmoid((q - (1 - Math.min(Math.max(frac, 5e-3), 1))) / SOFT);
   var inBottom = (q, frac) => sigmoid((Math.min(Math.max(frac, 0), 1) - q) / SOFT);
-  var strengthCache = /* @__PURE__ */ new Map();
+  var strengthCache2 = /* @__PURE__ */ new Map();
   function boardStrengths(board) {
     const k = board.join(",");
-    let s = strengthCache.get(k);
+    let s = strengthCache2.get(k);
     if (!s) {
       s = comboStrengths(board, [], board.length === 5 ? 1 : 40);
-      if (strengthCache.size > 32) strengthCache.clear();
-      strengthCache.set(k, s);
+      if (strengthCache2.size > 32) strengthCache2.clear();
+      strengthCache2.set(k, s);
     }
     return s;
   }
@@ -629,7 +865,9 @@
   var POSTFLOP_ORDER = { SB: 0, BB: 1, UTG: 2, MP: 3, CO: 4, BTN: 5 };
   var fmt = (n) => Math.abs(n) >= 100 ? Math.round(n).toString() : n.toFixed(1).replace(/\.0$/, "");
   var pct = (x) => `${Math.round(x * 100)}%`;
-  function advise(s, model2, opts = {}) {
+  function advise(s, learned, opts = {}) {
+    const useReads2 = opts.useReads ?? true;
+    const model2 = useReads2 ? learned : new OpponentModel();
     const hero = s.players.find((p) => p.seat === s.heroSeat);
     if (!hero || s.heroCards.length !== 2 || hero.folded || !s.handActive || s.street === "showdown") return null;
     if (hero.stack <= 0) return null;
@@ -687,10 +925,11 @@
       toCall: ctx.toCall,
       pot: s.pot,
       potOdds,
-      reasons: explain(ctx, best, options, eqAll, potOdds),
+      reasons: useReads2 ? explain(ctx, best, options, eqAll, potOdds) : ["Reads off: everyone treated as a typical player", ...explain(ctx, best, options, eqAll, potOdds)],
       villains: villainViews,
       heroCards: cardsToString(heroCards),
-      confident: profiles.every((p) => p.hands >= 25)
+      confident: !useReads2 || profiles.every((p) => p.hands >= 25),
+      usedReads: useReads2
     };
   }
   function equityVs(ctx, ranges, salt = 0) {
@@ -944,188 +1183,6 @@
     return reasons;
   }
 
-  // src/opponents/model.ts
-  var PRIORS = {
-    vpip: [0.5, 12],
-    pfr: [0.22, 12],
-    limp: [0.25, 8],
-    steal: [0.45, 8],
-    foldToSteal: [0.45, 8],
-    threeBet: [0.1, 10],
-    foldTo3Bet: [0.45, 6],
-    callOpen: [0.4, 8],
-    cbet: [0.6, 8],
-    foldToCbet: [0.4, 8],
-    foldToBetFlop: [0.4, 8],
-    foldToBetTurn: [0.42, 8],
-    foldToBetRiver: [0.45, 8],
-    raiseVsBet: [0.1, 10],
-    betWhenCheckedTo: [0.35, 8],
-    wtsd: [0.35, 8],
-    wonAtShowdown: [0.5, 8],
-    bluffShare: [0.3, 6]
-  };
-  var POSTFLOP = ["flop", "turn", "river"];
-  var OpponentModel = class _OpponentModel {
-    players = /* @__PURE__ */ new Map();
-    static fromJSON(data) {
-      const m = new _OpponentModel();
-      if (Array.isArray(data)) {
-        for (const p of data) if (p?.key) m.players.set(p.key, p);
-      }
-      return m;
-    }
-    toJSON() {
-      return [...this.players.values()];
-    }
-    stats(key, name) {
-      let s = this.players.get(key);
-      if (!s) {
-        s = { key, name, hands: 0, counts: {} };
-        this.players.set(key, s);
-      }
-      s.name = name;
-      return s;
-    }
-    bump(s, stat, hit) {
-      const c = s.counts[stat] ??= [0, 0];
-      c[1]++;
-      if (hit) c[0]++;
-    }
-    profile(key, name = key) {
-      const s = this.players.get(key) ?? { key, name, hands: 0, counts: {} };
-      const stat = (n) => {
-        const [mean, k] = PRIORS[n];
-        const [hits, opps] = s.counts[n] ?? [0, 0];
-        return (hits + mean * k) / (opps + k);
-      };
-      const foldToBet = (street) => street === "turn" ? stat("foldToBetTurn") : street === "river" ? stat("foldToBetRiver") : stat("foldToBetFlop");
-      const vpip = stat("vpip");
-      const pfr = stat("pfr");
-      const fold = (stat("foldToBetFlop") + stat("foldToBetTurn") + stat("foldToBetRiver")) / 3;
-      let style = "unknown (few hands)";
-      if (s.hands >= 15) {
-        if (vpip > 0.6 && fold < 0.35) style = "calling station";
-        else if (vpip > 0.55 && pfr > 0.35) style = "maniac";
-        else if (vpip < 0.3) style = pfr > 0.18 ? "tight-aggressive" : "nit";
-        else if (pfr / vpip > 0.6) style = "loose-aggressive";
-        else if (pfr / vpip < 0.35) style = "loose-passive";
-        else style = "balanced";
-      }
-      return {
-        key,
-        name: s.name ?? name,
-        hands: s.hands,
-        stat,
-        raw: (n) => s.counts[n] ?? [0, 0],
-        foldToBet,
-        style
-      };
-    }
-    /** Learn from one finished hand. */
-    update(h) {
-      const pos = new Map(h.players.map((p) => [p.key, p.position]));
-      const stats = new Map(h.players.map((p) => [p.key, this.stats(p.key, p.name)]));
-      for (const s of stats.values()) s.hands++;
-      const pre = h.actions.filter((a) => a.street === "preflop" && a.type !== "post");
-      let raises = 0;
-      let opener;
-      let lastRaiser;
-      const acted = /* @__PURE__ */ new Set();
-      const vpip = /* @__PURE__ */ new Set();
-      const pfr = /* @__PURE__ */ new Set();
-      for (const a of pre) {
-        const s = stats.get(a.key);
-        if (!s) continue;
-        const first = !acted.has(a.key);
-        acted.add(a.key);
-        const aggressive = a.type === "raise" || a.type === "bet";
-        if (a.type === "call" || aggressive) vpip.add(a.key);
-        if (aggressive) pfr.add(a.key);
-        if (raises === 0 && first) {
-          const limpOpp = pos.get(a.key) !== "BB";
-          if (limpOpp) this.bump(s, "limp", a.type === "call");
-          const p = pos.get(a.key);
-          if ((p === "BTN" || p === "SB") && pre.slice(0, pre.indexOf(a)).every((x) => x.type === "fold"))
-            this.bump(s, "steal", aggressive);
-        } else if (raises === 1 && a.key !== opener) {
-          this.bump(s, "threeBet", aggressive);
-          if (!aggressive) this.bump(s, "callOpen", a.type === "call");
-          const op = opener ? pos.get(opener) : void 0;
-          const me = pos.get(a.key);
-          if ((op === "BTN" || op === "SB") && (me === "SB" || me === "BB") && first) this.bump(s, "foldToSteal", a.type === "fold");
-        } else if (raises === 2 && a.key === opener) {
-          this.bump(s, "foldTo3Bet", a.type === "fold");
-        }
-        if (aggressive) {
-          raises++;
-          if (raises === 1) opener = a.key;
-          lastRaiser = a.key;
-        }
-      }
-      for (const [key, s] of stats) {
-        if (!acted.has(key)) continue;
-        this.bump(s, "vpip", vpip.has(key));
-        this.bump(s, "pfr", pfr.has(key));
-      }
-      const foldedPre = new Set(pre.filter((a) => a.type === "fold").map((a) => a.key));
-      const sawFlop = h.board.length >= 3 ? [...stats.keys()].filter((k) => !foldedPre.has(k) && h.actions.some((a) => a.key === k)) : [];
-      for (const street of POSTFLOP) {
-        const acts = h.actions.filter((a) => a.street === street);
-        let betSeen = false;
-        let cbetMade = false;
-        for (const a of acts) {
-          const s = stats.get(a.key);
-          if (!s) continue;
-          const aggressive = a.type === "bet" || a.type === "raise";
-          if (!betSeen) {
-            if (street === "flop" && a.key === lastRaiser) this.bump(s, "cbet", aggressive);
-            else this.bump(s, "betWhenCheckedTo", aggressive);
-            if (aggressive && street === "flop" && a.key === lastRaiser) cbetMade = true;
-          } else {
-            const fs = street === "flop" ? "foldToBetFlop" : street === "turn" ? "foldToBetTurn" : "foldToBetRiver";
-            this.bump(s, fs, a.type === "fold");
-            this.bump(s, "raiseVsBet", a.type === "raise");
-            if (cbetMade && street === "flop" && a.key !== lastRaiser) this.bump(s, "foldToCbet", a.type === "fold");
-          }
-          if (aggressive) betSeen = true;
-        }
-      }
-      const shown = h.result?.shown ?? {};
-      const atShowdown = new Set(Object.keys(shown));
-      if (h.heroKey && h.heroCards?.length === 2 && Object.keys(shown).length) atShowdown.add(h.heroKey);
-      for (const k of sawFlop) {
-        const s = stats.get(k);
-        const went = atShowdown.has(k);
-        this.bump(s, "wtsd", went);
-        if (went) this.bump(s, "wonAtShowdown", (h.result?.won[k] ?? 0) > 0);
-      }
-      for (const [key, cards] of Object.entries(shown)) {
-        const s = stats.get(key);
-        if (!s || cards.length !== 2) continue;
-        for (const street of POSTFLOP) {
-          const bets = h.actions.filter((a) => a.key === key && a.street === street && (a.type === "bet" || a.type === "raise"));
-          if (!bets.length) continue;
-          const board = h.board.slice(0, street === "flop" ? 3 : street === "turn" ? 4 : 5);
-          if (board.length < 3) continue;
-          const strength = handStrength(cards, board);
-          for (let i = 0; i < bets.length; i++) this.bump(s, "bluffShare", strength < 0.45);
-        }
-      }
-    }
-  };
-  var strengthCache2 = /* @__PURE__ */ new Map();
-  function handStrength(cards, board) {
-    const k = board.join(",");
-    let st = strengthCache2.get(k);
-    if (!st) {
-      st = comboStrengths(board);
-      if (strengthCache2.size > 64) strengthCache2.clear();
-      strengthCache2.set(k, st);
-    }
-    return st[comboIndex(cards[0], cards[1])];
-  }
-
   // src/overlay/overlay.ts
   var CSS = `
 :host { all: initial; }
@@ -1165,6 +1222,9 @@ tr.best td { color: #81c995; font-weight: 700; }
 .pos { color: #81c995; } .neg { color: #f28b82; }
 .villain { margin: 4px 0; }
 .row { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #9aa0a6; margin-bottom: 8px; cursor: pointer; }
+.scroll { overflow-x: auto; }
+select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-radius: 4px; font: inherit; font-size: 11px; max-width: 90px; }
 `;
   var SUIT_CLASS = ["c", "d", "h", "s"];
   var SUIT_SYMBOL = ["\u2663", "\u2666", "\u2665", "\u2660"];
@@ -1206,6 +1266,18 @@ tr.best td { color: #81c995; font-weight: 700; }
         if (act === "reset" && confirm("Reset the ledger for this lobby?")) this.actions.resetLedger();
         if (act === "capture") this.actions.saveCapture();
       });
+      this.root.addEventListener("change", (e) => {
+        const t = e.target;
+        if (t.dataset.act === "reads") this.actions.setUseReads(t.checked);
+        if (t.dataset.act === "merge" && t.value) {
+          const from = t.dataset.key;
+          const fromName = t.dataset.name;
+          const intoName = t.selectedOptions[0]?.textContent ?? t.value;
+          if (confirm(`Merge ${fromName} into ${intoName}? Their history is combined and future hands from either account count as ${intoName}. This can't be undone.`))
+            this.actions.merge(from, t.value);
+          else t.value = "";
+        }
+      });
       window.addEventListener("keydown", (e) => {
         if (e.altKey && e.key.toLowerCase() === "b") this.panel.classList.toggle("min");
       });
@@ -1216,6 +1288,7 @@ tr.best td { color: #81c995; font-weight: 700; }
     tab = "advice";
     advice = null;
     thinking = false;
+    useReads = true;
     makeDraggable() {
       const head = this.root.querySelector(".head");
       let dx = 0;
@@ -1254,6 +1327,9 @@ tr.best td { color: #81c995; font-weight: 700; }
     setAdvice(a) {
       this.advice = a;
     }
+    setUseReads(on) {
+      this.useReads = on;
+    }
     render(s, model2, ledger) {
       this.setStatus(s.handActive ? `hand ${s.handNumber} \xB7 ${s.street} \xB7 ${s.sb}/${s.bb}${s.paused ? " \xB7 paused" : ""}` : s.players.length ? "between hands" : "waiting for game\u2026");
       this.renderAdvice(s);
@@ -1264,7 +1340,8 @@ tr.best td { color: #81c995; font-weight: 700; }
       const hero = s.players.find((p) => p.seat === s.heroSeat);
       const heroTurn = !!hero && s.toActSeat === s.heroSeat;
       const a = heroTurn ? this.advice : null;
-      let html = "";
+      let html = `<label class="toggle" title="Off: ignore what's been learned about your mates and treat everyone as a typical player">
+      <input type="checkbox" data-act="reads" ${this.useReads ? "checked" : ""}> Use reads on mates</label>`;
       if (s.heroCards.length) html += `<div class="cards">${cardHtml(s.heroCards)}</div>`;
       html += `<div class="board">${s.board.length ? `Board ${cardHtml(s.board)}` : s.handActive ? "Preflop" : ""}${s.handActive ? ` \xB7 Pot ${s.pot}` : ""}</div>`;
       if (!s.handActive) html += `<div class="rec wait">Waiting for the next hand</div>`;
@@ -1280,13 +1357,20 @@ tr.best td { color: #81c995; font-weight: 700; }
         html += `<ul>${a.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`;
         html += `<table><tr><th>Option</th><th>EV (chips)</th></tr>${a.options.slice(0, 6).map((o, i) => `<tr class="${i === 0 ? "best" : ""}"><td>${esc(o.label)}</td><td>${o.ev >= 0 ? "+" : ""}${o.ev.toFixed(1)}</td></tr>`).join("")}</table>`;
         html += a.villains.map((v) => `<div class="villain"><b>${esc(v.name)}</b> <span class="muted">${v.position ?? ""} \xB7 top ${pct2(v.rangeWidth)} \xB7 ${esc(v.style)}</span><br><span class="muted">${esc(v.likely.join(" "))}</span></div>`).join("");
-        if (!a.confident) html += `<div class="muted">Reads are still mostly default assumptions; they sharpen as hands are played.</div>`;
+        if (!a.usedReads) html += `<div class="muted">Reads off: advice assumes typical opponents.</div>`;
+        else if (!a.confident) html += `<div class="muted">Reads are still mostly default assumptions; they sharpen as hands are played.</div>`;
       }
       this.pane("advice").innerHTML = html;
     }
     renderPlayers(s, model2) {
-      const keys = s.players.filter((p) => p.seat !== s.heroSeat).map((p) => p.key);
-      for (const p of model2.players.values()) if (!keys.includes(p.key) && p.key !== s.heroKey) keys.push(p.key);
+      const heroKey = s.heroKey ? model2.resolve(s.heroKey) : void 0;
+      const keys = [];
+      const add = (k) => {
+        const r = model2.resolve(k);
+        if (r !== heroKey && !keys.includes(r)) keys.push(r);
+      };
+      for (const p of s.players) if (p.seat !== s.heroSeat) add(p.key);
+      for (const p of model2.players.values()) add(p.key);
       const rows = [
         ["VPIP", "vpip"],
         ["Raise preflop", "pfr"],
@@ -1307,15 +1391,19 @@ tr.best td { color: #81c995; font-weight: 700; }
         return;
       }
       const profiles = keys.map((k) => model2.profile(k, s.players.find((p) => p.key === k)?.name ?? k));
-      let html = `<table><tr><th></th>${profiles.map((p) => `<th>${esc(p.name)}</th>`).join("")}</tr>`;
+      const aka = (k) => model2.players.get(k)?.aliasNames?.filter(Boolean) ?? [];
+      let html = `<div class="scroll"><table><tr><th></th>${profiles.map((p) => `<th>${esc(p.name)}${aka(p.key).length ? `<br><span class="muted">aka ${esc(aka(p.key).join(", "))}</span>` : ""}</th>`).join("")}</tr>`;
       html += `<tr><td>Hands</td>${profiles.map((p) => `<td>${p.hands}</td>`).join("")}</tr>`;
       for (const [label, stat] of rows)
         html += `<tr><td>${label}</td>${profiles.map((p) => {
           const [, n] = p.raw(stat);
           return `<td title="${n} samples">${pct2(p.stat(stat))}${n < 5 ? "*" : ""}</td>`;
         }).join("")}</tr>`;
-      html += `<tr><td>Style</td>${profiles.map((p) => `<td>${esc(p.style.split(" (")[0])}</td>`).join("")}</tr></table>`;
-      html += `<div class="muted">* fewer than 5 samples: mostly the default assumption.</div>`;
+      html += `<tr><td>Style</td>${profiles.map((p) => `<td>${esc(p.style.split(" (")[0])}</td>`).join("")}</tr>`;
+      html += `<tr><td>Same person as\u2026</td>${profiles.map(
+        (p) => `<td><select data-act="merge" data-key="${esc(p.key)}" data-name="${esc(p.name)}"><option value="">\u2013</option>${profiles.filter((o) => o.key !== p.key).map((o) => `<option value="${esc(o.key)}">${esc(o.name)}</option>`).join("")}</select></td>`
+      ).join("")}</tr></table></div>`;
+      html += `<div class="muted">* fewer than 5 samples: mostly the default assumption. Profiles follow each account, so a new name on the same account is recognised automatically; use "Same person as\u2026" when a mate plays from a different account or device.</div>`;
       this.pane("players").innerHTML = html;
     }
     renderLedger(rows) {
@@ -1929,6 +2017,7 @@ tr.best td { color: #81c995; font-weight: 700; }
 
   // src/extension/content.ts
   var MODEL_KEY = "pb:model";
+  var SETTINGS_KEY = "pb:settings";
   var LEDGER_PREFIX = "pb:ledger:";
   var LEDGER_MAX_AGE_MS = 16 * 3600 * 1e3;
   var CAPTURE_LIMIT = 2e4;
@@ -1937,6 +2026,7 @@ tr.best td { color: #81c995; font-weight: 700; }
   var capture = [];
   var started = Date.now();
   var ledgerRestored = false;
+  var useReads = true;
   var overlay = new Overlay({
     resetLedger() {
       tracker.resetLedger();
@@ -1953,11 +2043,28 @@ tr.best td { color: #81c995; font-weight: 700; }
       a.download = `pokerpatio-capture-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.json`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 1e3);
+    },
+    setUseReads(on) {
+      useReads = on;
+      overlay.setUseReads(on);
+      storage?.set({ [SETTINGS_KEY]: { useReads } });
+      recomputeAdvice();
+    },
+    merge(fromKey, intoKey) {
+      model.merge(fromKey, intoKey);
+      saveModel();
+      recomputeAdvice();
+      render();
     }
   });
   var storage = typeof chrome !== "undefined" ? chrome.storage?.local : void 0;
-  storage?.get(MODEL_KEY).then((v) => {
+  storage?.get([MODEL_KEY, SETTINGS_KEY]).then((v) => {
     if (v[MODEL_KEY]) model = OpponentModel.fromJSON(v[MODEL_KEY]);
+    const settings = v[SETTINGS_KEY];
+    if (settings?.useReads === false) {
+      useReads = false;
+      overlay.setUseReads(false);
+    }
     render();
   });
   var saveTimer;
@@ -1987,7 +2094,9 @@ tr.best td { color: #81c995; font-weight: 700; }
     });
   }
   var adviceToken = 0;
-  tracker.on("heroTurn", () => {
+  function recomputeAdvice() {
+    const s = tracker.state;
+    if (!s.heroSeat || s.toActSeat !== s.heroSeat) return;
     const token = ++adviceToken;
     overlay.setAdvice(null);
     overlay.setThinking(true);
@@ -1995,14 +2104,15 @@ tr.best td { color: #81c995; font-weight: 700; }
     setTimeout(() => {
       if (token !== adviceToken) return;
       try {
-        overlay.setAdvice(advise(tracker.state, model));
+        overlay.setAdvice(advise(tracker.state, model, { useReads }));
       } catch (e) {
         console.warn("[poker-bot] advice failed", e);
       }
       overlay.setThinking(false);
       render();
     }, 30);
-  });
+  }
+  tracker.on("heroTurn", recomputeAdvice);
   tracker.on("handComplete", (h) => {
     model.update(h);
     saveModel();

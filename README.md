@@ -28,6 +28,12 @@ the extension in `chrome://extensions` and refresh the game tab.
   mostly the default assumption.
 - **Ledger tab:** buy-ins, re-buys, cash-outs, current stack and net result for
   everyone in the lobby. It works whether or not you're the lobby admin.
+- **Use reads on mates** (Advice tab): switch off to ignore everything learned
+  about your mates and get advice that treats everyone as a typical player.
+- **Same person as…** (Players tab): if a mate plays from a different account
+  or device, merge the two profiles. Their history is combined, and future
+  hands from either account count towards one profile. A name change on the
+  same account is recognised automatically.
 - **Alt+B** hides or shows the panel. Drag it by its title bar.
 
 What it learns about your mates is saved in your browser and carries over

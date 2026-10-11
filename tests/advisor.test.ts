@@ -175,3 +175,45 @@ describe("opponent model", () => {
     expect(restored.profile("x").stat("pfr")).toBeCloseTo(x.stat("pfr"));
   });
 });
+
+describe("profile merging and reads toggle", () => {
+  const hand = (key: string, name: string, foldsPre: boolean) => ({
+    handNumber: 1,
+    sb: 8,
+    bb: 15,
+    board: [],
+    players: [
+      { key, name, seat: "s1", startStack: 500, position: "BTN" as const },
+      { key: "me", name: "Me", seat: "s2", startStack: 500, position: "BB" as const },
+    ],
+    actions: [
+      { key, seat: "s1", street: "preflop" as const, type: (foldsPre ? "fold" : "raise") as "fold" | "raise", added: foldsPre ? 0 : 38, toTotal: foldsPre ? 0 : 38, facing: 15, potBefore: 23, allIn: false, raisesBefore: 0, auto: false },
+    ],
+  });
+
+  it("combines two accounts into one profile and routes future hands to it", () => {
+    const m = new OpponentModel();
+    for (let i = 0; i < 10; i++) m.update(hand("acct-a", "Sam", false));
+    for (let i = 0; i < 10; i++) m.update(hand("acct-b", "Sammy", true));
+    m.merge("acct-b", "acct-a");
+    expect(m.players.has("acct-b")).toBe(false);
+    expect(m.profile("acct-a").hands).toBe(20);
+    expect(m.profile("acct-b").hands).toBe(20); // the old account resolves to the merged profile
+    expect(m.players.get("acct-a")!.aliasNames).toContain("Sammy");
+    m.update(hand("acct-b", "Sammy", true));
+    expect(m.profile("acct-a").hands).toBe(21);
+    const restored = OpponentModel.fromJSON(JSON.parse(JSON.stringify(m.toJSON())));
+    expect(restored.profile("acct-b").hands).toBe(21);
+  });
+
+  it("reads off gives the same advice as an empty model", () => {
+    const learned = new OpponentModel();
+    for (let i = 0; i < 60; i++) learned.update(hand("sam", "sam", true));
+    const s = unopenedButton("Ts 9s");
+    const off = advise(s, learned, { seed: 9, useReads: false })!;
+    const fresh = advise(s, new OpponentModel(), { seed: 9 })!;
+    expect(off.best.label).toBe(fresh.best.label);
+    expect(off.usedReads).toBe(false);
+    expect(off.options.map((o) => o.ev)).toEqual(fresh.options.map((o) => o.ev));
+  });
+});
