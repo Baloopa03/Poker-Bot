@@ -665,8 +665,8 @@
         const [nv] = prior("vpip", bucket);
         const loose = vpip - nv;
         const aggr = pfr / Math.max(0.01, vpip);
-        if (loose > 0.12 && fold < 0.3) style = "calling station";
-        else if (loose > 0.1 && aggr > 0.7) style = "maniac";
+        if (loose > 0.1 && aggr > 0.65) style = "maniac";
+        else if (loose > 0.12 && fold < 0.3) style = "calling station";
         else if (loose < -0.12) style = aggr > 0.6 ? "tight-aggressive" : "nit";
         else if (loose > 0.08) style = aggr > 0.55 ? "loose-aggressive" : "loose-passive";
         else style = aggr < 0.45 ? "passive" : "solid";
