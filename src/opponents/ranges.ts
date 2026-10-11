@@ -190,6 +190,31 @@ export function respondToBet(range: Range, board: readonly Card[], profile: Prof
   return { fold: total > 0 ? 1 - kept / total : 1, continuing, raising, continueFreq: total > 0 ? kept / total : 0 };
 }
 
+/**
+ * Split a range into the hands that bet when checked to and those that check,
+ * using the player's bet frequency and bluff share (value from the top,
+ * bluffs from the bottom).
+ */
+export function bettingSplit(range: Range, board: readonly Card[], profile: Profile, isCbet: boolean) {
+  const q = rangePercentiles(range, boardStrengths(board));
+  const betFreq = isCbet ? profile.stat("cbet") : profile.stat("betWhenCheckedTo");
+  const bluff = profile.stat("bluffShare");
+  const betting = new Range();
+  const checking = new Range();
+  let total = 0;
+  let bet = 0;
+  for (let i = 0; i < NUM_COMBOS; i++) {
+    const w = range.w[i];
+    if (w <= 0) continue;
+    const pBet = Math.min(1, inTop(q[i], betFreq * (1 - bluff)) + 0.8 * inBottom(q[i], betFreq * bluff));
+    betting.w[i] = w * pBet;
+    checking.w[i] = w * (1 - pBet);
+    total += w;
+    bet += w * pBet;
+  }
+  return { betProb: total > 0 ? bet / total : 0, betting, checking };
+}
+
 /** Share of all 1326 combos in a range (by weight), e.g. for display "top 23%". */
 export function rangeWidth(range: Range): number {
   let s = 0;

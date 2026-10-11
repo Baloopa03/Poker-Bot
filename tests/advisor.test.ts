@@ -338,3 +338,42 @@ describe("people manager", () => {
     expect(m.people().map((p) => p.label)).toEqual(["Isaiah"]);
   });
 });
+
+describe("EV maths", () => {
+  it("prices a call exactly: with the nuts on the river, calling is worth the whole pot", () => {
+    const s = table({
+      hero: "Ah Kh",
+      board: "Qh Jh Th 2c 3d",
+      street: "river",
+      players: [player("me", "s1", "BTN", 400, 0), player("sam", "s2", "SB", 300, 60)],
+      currentBet: 60,
+      pot: 160,
+      actions: [...blinds(), { key: "sam", seat: "s2", street: "river", type: "bet", added: 60, toTotal: 60, facing: 0, potBefore: 100, raisesBefore: 0 }],
+    });
+    const a = advise(s, new OpponentModel(), { seed: 21 })!;
+    const call = a.options.find((o) => o.action === "call")!;
+    expect(call.ev).toBeCloseTo(160, 5); // EV = equity × (pot + call) − call = 1 × 220 − 60
+    expect(a.options.find((o) => o.action === "fold")!.ev).toBe(0);
+    expect(a.potOdds).toBeCloseTo(60 / 220, 5);
+  });
+
+  it("values checking with the opponent's reply, not a flat discount", () => {
+    // Hero out of position on the river with a weak hand: checking keeps only
+    // what we win when it checks through; it must not exceed our raw share.
+    const s = table({
+      hero: "4c 5d",
+      board: "Ks Qs 9h 8d 2c",
+      street: "river",
+      players: [player("me", "s1", "SB", 400), player("sam", "s2", "BTN", 400)],
+      currentBet: 0,
+      pot: 100,
+      actions: blinds(),
+    });
+    s.players[0].position = "SB";
+    s.players[1].position = "BB";
+    const a = advise(s, new OpponentModel(), { seed: 22 })!;
+    const check = a.options.find((o) => o.action === "check")!;
+    expect(check.ev).toBeGreaterThanOrEqual(0);
+    expect(check.ev).toBeLessThanOrEqual(a.equity * 100 + 1e-6);
+  });
+});

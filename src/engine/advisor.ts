@@ -3,7 +3,7 @@ import { equity, riverEquityExact } from "./equity";
 import { COMBOS as COMBO_CARDS, NUM_COMBOS, Range, classOf } from "./range";
 import { preflopComboStrengths, preflopScores } from "./strength";
 import { OpponentModel, type Profile } from "../opponents/model";
-import { boardStrengths, estimateRange, rangeWidth, respondToBet } from "../opponents/ranges";
+import { bettingSplit, boardStrengths, estimateRange, rangeWidth, respondToBet } from "../opponents/ranges";
 import type { PlayerState, Position, TableState } from "../tracker/types";
 
 // The decision engine. Every legal option is scored by expected chips won
@@ -179,11 +179,17 @@ function equityVs(ctx: Ctx, ranges: Range[], salt = 0): number {
   }
 }
 
-/** Fraction of equity hero actually collects when the hand continues to later streets. */
-function realization(ctx: Ctx, allInNow: boolean): number {
+/**
+ * Fraction of equity hero actually collects when the hand continues to later
+ * streets. Position matters, and so does hand strength: strong hands win more
+ * than their raw share (they get paid later), weak hands less (they get bet off
+ * the pot). All-in or on the river, equity is exactly what you get.
+ */
+function realization(ctx: Ctx, allInNow: boolean, eq = 0.5): number {
   if (allInNow || ctx.s.street === "river") return 1;
-  if (ctx.preflop) return ctx.heroInPosition ? 0.9 : ctx.hero.position === "SB" ? 0.72 : 0.8;
-  return ctx.heroInPosition ? 0.97 : 0.88;
+  const base = ctx.preflop ? (ctx.heroInPosition ? 0.9 : ctx.hero.position === "SB" ? 0.72 : 0.8) : ctx.heroInPosition ? 0.97 : 0.88;
+  const byStrength = Math.min(1.12, Math.max(0.85, 0.8 + 0.4 * eq));
+  return Math.min(1.1, base * byStrength);
 }
 
 /** How often this villain continues vs a ~2/3-pot bet / standard raise in the current spot. */
@@ -212,14 +218,14 @@ function callEV(ctx: Ctx, eqAll: number): number {
   const allIn = toCall >= hero.stack;
   const pending = villains.map((v, i) => i).filter((i) => !villains[i].allIn && villains[i].committedStreet < s.currentBet);
   if (!pending.length) {
-    const R = realization(ctx, allIn || villains.every((v) => v.allIn));
+    const R = realization(ctx, allIn || villains.every((v) => v.allIn), eqAll);
     return R * eqAll * (s.pot + toCall) - toCall;
   }
   const heroTo = hero.committedStreet + toCall;
   const resp = pending.map((i) => {
     const v = villains[i];
     const callAmt = Math.max(0, Math.min(s.currentBet, v.committedStreet + v.stack) - v.committedStreet);
-    const ratio = callAmt / Math.max(1, s.pot + toCall);
+    const ratio = callAmt / Math.max(1, s.pot + toCall - callAmt);
     const base = ctx.preflop ? (ctx.raises <= 1 ? ctx.profiles[i].stat("callOpen") + ctx.profiles[i].stat("threeBet") : 0.3) : 1 - ctx.profiles[i].foldToBet(s.street as "flop");
     return { i, callAmt, ...respondToBet(ctx.ranges[i], s.board, ctx.profiles[i], ratio, Math.min(0.9, base)) };
   });
@@ -233,7 +239,7 @@ function callEV(ctx: Ctx, eqAll: number): number {
     const live = ranges.filter((r): r is Range => r !== null);
     const extra = resp.reduce((sum, r, k) => sum + (mask & (1 << k) ? Math.min(r.callAmt, Math.max(0, heroTo - villains[r.i].committedStreet)) : 0), 0);
     const eq = live.length === villains.length ? eqAll : equityVs(ctx, live, 101 + mask);
-    const R = realization(ctx, allIn);
+    const R = realization(ctx, allIn, eq);
     ev += prob * (R * eq * (s.pot + toCall + extra) - toCall);
   }
   return ev;
@@ -316,11 +322,29 @@ function sizeTargets(ctx: Ctx): number[] {
   return [0.75, 1.1].map((f) => s.currentBet + f * potAfterCall);
 }
 
+/**
+ * EV of checking. Heads-up with the opponent still to act, model their reply:
+ * they bet their strong hands plus some bluffs (by their stats) and we then
+ * call or fold against that betting range; otherwise the hand checks through.
+ */
 function checkEV(ctx: Ctx, eqAll: number): number {
-  const { s } = ctx;
+  const { s, hero } = ctx;
   if (s.street === "river" && ctx.heroInPosition) return eqAll * s.pot; // checks down
-  // Checking gives villains a free card or a chance to bet us off our equity.
-  const R = ctx.preflop ? 0.85 : ctx.heroInPosition ? 0.93 : 0.82;
+  if (ctx.preflop) return realization(ctx, false, eqAll) * eqAll * s.pot;
+  const v = ctx.villains[0];
+  if (ctx.villains.length === 1 && !ctx.heroInPosition && !v.allIn && v.stack > 0) {
+    const lastPreRaiser = [...s.actions].reverse().find((a) => a.street === "preflop" && (a.type === "raise" || a.type === "bet"))?.key;
+    const isCbet = s.street === "flop" && lastPreRaiser === v.key;
+    const split = bettingSplit(ctx.ranges[0], s.board, ctx.profiles[0], isCbet);
+    const bet = Math.min(Math.round(0.66 * s.pot), v.stack, hero.stack);
+    const eqVsBet = split.betting.size() > 1e-6 ? equityVs(ctx, [split.betting], 211) : 0;
+    const eqVsCheck = split.checking.size() > 1e-6 ? equityVs(ctx, [split.checking], 223) : eqAll;
+    const facingBet = Math.max(0, realization(ctx, bet >= hero.stack, eqVsBet) * eqVsBet * (s.pot + 2 * bet) - bet);
+    const checkedThrough = (s.street === "river" ? 1 : realization(ctx, false, eqVsCheck)) * eqVsCheck * s.pot;
+    return split.betProb * facingBet + (1 - split.betProb) * checkedThrough;
+  }
+  // In position (free card) or multiway: discounted share of the pot.
+  const R = realization(ctx, false, eqAll) * (ctx.heroInPosition ? 1 : 0.93);
   return R * eqAll * s.pot;
 }
 
@@ -368,7 +392,8 @@ function aggressiveEV(ctx: Ctx, to: number): AggResult {
     const heroAllIn = heroAdded >= hero.stack;
     const everyoneAllIn = heroAllIn || callers.every((i) => villains[i].committedStreet + villains[i].stack <= heroTo);
     // Each extra caller makes it harder to realise equity.
-    const R = realization(ctx, everyoneAllIn) * (1 - 0.04 * (callers.length - 1));
+    const multiway = 1 - 0.04 * (callers.length - 1);
+    const R = (eq: number) => realization(ctx, everyoneAllIn, eq) * multiway;
 
     let scenarioEV: number;
     if (callers.length === 1 && resp[callers[0]].canAct && !everyoneAllIn) {
@@ -380,7 +405,7 @@ function aggressiveEV(ctx: Ctx, to: number): AggResult {
       const pRaise = contW > 0 ? raiseW / contW : 0;
       const flatRange = new Range(Float64Array.from(resp[i].continuing.w, (w, k) => Math.max(0, w - resp[i].raising.w[k])));
       const eqFlat = flatRange.size() > 1e-6 ? equityVs(ctx, [flatRange], mask * 13 + to) : 0.5;
-      const callEV = R * eqFlat * finalPot - heroAdded;
+      const callEV = R(eqFlat) * eqFlat * finalPot - heroAdded;
       let raisedEV = -heroAdded;
       if (pRaise > 0.01) {
         const villainMax = v.committedStreet + v.stack;
@@ -389,14 +414,14 @@ function aggressiveEV(ctx: Ctx, to: number): AggResult {
         const heroTotal = Math.min(jam, hero.committedStreet + hero.stack);
         const eqVsRaise = equityVs(ctx, [resp[i].raising], mask * 17 + to);
         const potIfCalled = s.pot + (heroTotal - hero.committedStreet) + (Math.min(heroTotal, villainMax) - v.committedStreet);
-        const Rr = realization(ctx, heroTotal >= hero.committedStreet + hero.stack || jam >= villainMax);
+        const Rr = realization(ctx, heroTotal >= hero.committedStreet + hero.stack || jam >= villainMax, eqVsRaise);
         raisedEV = Math.max(-heroAdded, Rr * eqVsRaise * potIfCalled - (heroTotal - hero.committedStreet));
       }
       scenarioEV = (1 - pRaise) * callEV + pRaise * raisedEV;
       eqCalledSum += prob * eqFlat;
     } else {
       const eq = equityVs(ctx, callers.map((i) => resp[i].continuing), mask * 19 + to);
-      scenarioEV = R * eq * finalPot - heroAdded;
+      scenarioEV = R(eq) * eq * finalPot - heroAdded;
       eqCalledSum += prob * eq;
     }
     eqCalledW += prob;
