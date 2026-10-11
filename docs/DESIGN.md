@@ -156,6 +156,14 @@ Then pick one of two approaches:
   extension that wraps `WebSocket` and the socket.io XHR at `document_start`,
   decodes Engine.IO/Socket.IO packets, redacts credential-like keys and
   saves a JSON capture. The real Adapter (approach A) will reuse this tap.
+- **Fourth capture (recorder, 2026-10-11): success.** The full game feed is
+  plain JSON over socket.io at `wss://gs2.pokerpatio.com/mp/socket.io/`.
+  It includes the hero's cards, the board, every action with exact chip
+  amounts, blinds, stacks, positions and results. Opponent cards are only
+  revealed at showdown. The full event reference is in
+  [`PROTOCOL.md`](PROTOCOL.md), and the capture is saved at
+  `tests/fixtures/pokerpatio/heads-up-5-hands.json`. **Approach A (WebSocket
+  tap) is confirmed.**
 - Telemetry is a backup signal at best. Never rely on it for game state.
 
 Either way the Adapter outputs neutral events (`HandStarted`, `HoleCards`,
@@ -303,5 +311,6 @@ Tooling: TypeScript, Vite (extension build), Vitest (tests).
   net result per player.
 
 **Open**
-- WebSocket message format: needs a private-lobby WS capture (§4).
+- WebSocket message format: done for heads-up (see PROTOCOL.md). A 3-player
+  capture with a re-buy is still wanted.
 - (none beyond the capture)
