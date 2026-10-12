@@ -1498,7 +1498,8 @@
       const o = aggressiveEV(ctx, to);
       const risk = Math.min(to, biggestVillain) - hero.committedStreet;
       const overPot = Math.max(0, risk - (s.pot + toCall));
-      o.ev -= 0.015 * Math.max(0, risk) + 0.04 * overPot;
+      const streetsLeft = s.street === "flop" ? 2 : s.street === "turn" ? 1 : 0;
+      o.ev -= 0.015 * Math.max(0, risk) + 0.04 * overPot + 0.03 * streetsLeft * Math.max(0, overPot - (s.pot + toCall));
       const action = s.currentBet > 0 ? "raise" : "bet";
       const isAllIn = to >= maxTo;
       const sizeNote = ctx.preflop ? `${fmt(to / ctx.bb)} BB` : `${Math.round((to - s.currentBet) / Math.max(1, s.pot + toCall) * 100)}% pot`;
