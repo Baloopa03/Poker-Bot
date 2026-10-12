@@ -171,7 +171,7 @@ export function estimateRange(ctx: RangeContext): Range {
       // too). One likelihood for both outcomes keeps the update consistent:
       // a check barely narrows, a lead shifts the range up without erasing
       // top pair. When checked to, betting is more strongly value + bluffs.
-      const pLead = (i: number) => Math.min(1, (freq * (0.25 + 1.5 * q[i] * q[i])) / 0.75);
+      const pLead = (i: number) => Math.min(1, (freq * (0.15 + 2.4 * q[i] ** 3)) / 0.75);
       if (spot === "lead") reweight(range, (i) => (a.type === "check" ? 1 - pLead(i) : Math.max(0.01, pLead(i))));
       else if (a.type === "check") reweight(range, (i) => Math.max(0.25, 1 - polar(i)));
       else reweight(range, (i) => Math.max(0.01, polar(i)));
