@@ -67,6 +67,8 @@ npm run typecheck
 npm run build       # rebuilds ./extension
 node scripts/e2e.mjs                          # loads the extension in Chromium and replays a capture
 npx tsx scripts/advise-replay.ts <capture>    # prints the advice for every decision in a capture
+npx tsx scripts/diag-preflop.ts [stack]        # % of hands it raises/calls/folds in standard preflop spots
+npx tsx scripts/diag-postflop.ts "Kh 2c 4s 5s Jd" [bet] [stack]   # what it does with every hand type in a spot
 ```
 
 ### Simulator
