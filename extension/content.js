@@ -728,29 +728,31 @@
     "6": { vpip: 0.25, pfr: 0.2, limp: 0.05, steal: 0.4, foldToSteal: 0.6, threeBet: 0.08, foldTo3Bet: 0.5, callOpen: 0.2 }
   };
   var PRIORS = {
-    vpip: [0.47, 12],
-    pfr: [0.36, 12],
-    limp: [0.08, 8],
-    steal: [0.55, 8],
-    foldToSteal: [0.45, 8],
-    threeBet: [0.13, 10],
-    foldTo3Bet: [0.45, 6],
-    callOpen: [0.3, 8],
-    cbet: [0.55, 8],
-    foldToCbet: [0.4, 8],
-    foldToBetFlop: [0.4, 8],
-    foldToBetTurn: [0.4, 8],
-    foldToBetRiver: [0.4, 8],
-    raiseVsBet: [0.1, 10],
-    betWhenCheckedTo: [0.4, 8],
+    vpip: [0.47, 25],
+    pfr: [0.36, 25],
+    limp: [0.08, 25],
+    steal: [0.55, 25],
+    foldToSteal: [0.45, 30],
+    threeBet: [0.13, 40],
+    foldTo3Bet: [0.45, 30],
+    callOpen: [0.3, 30],
+    cbet: [0.55, 30],
+    foldToCbet: [0.4, 30],
+    foldToBetFlop: [0.4, 35],
+    foldToBetTurn: [0.4, 35],
+    foldToBetRiver: [0.4, 35],
+    raiseVsBet: [0.1, 40],
+    betWhenCheckedTo: [0.4, 30],
     // Betting out into the previous street's aggressor ("donk"/lead): rare.
-    lead: [0.1, 8],
-    wtsd: [0.3, 8],
-    wonAtShowdown: [0.5, 8],
-    bluffShare: [0.3, 6],
-    // Per bet size (small < 0.6 pot ≤ big); priors come from the player's overall bluff share, see profile().
-    bluffShareSmall: [0.26, 6],
-    bluffShareBig: [0.34, 6]
+    lead: [0.1, 30],
+    wtsd: [0.3, 40],
+    wonAtShowdown: [0.5, 40],
+    bluffShare: [0.3, 25],
+    // Per bet size (small < 0.6 pot ≤ big). Theory says bigger bets carry more
+    // bluffs, coaching experience says recreational players' big bets carry
+    // fewer; with no consensus, size starts neutral and is learned per player.
+    bluffShareSmall: [0.3, 25],
+    bluffShareBig: [0.3, 25]
   };
   function prior(stat, bucket) {
     const [mean, k] = PRIORS[stat];
@@ -937,7 +939,7 @@
       const pfr = stat("pfr");
       const fold = (stat("foldToBetFlop") + stat("foldToBetTurn") + stat("foldToBetRiver")) / 3;
       let style = "unknown (few hands)";
-      if (s.hands >= 15) {
+      if (s.hands >= 40) {
         const [nv] = prior("vpip", bucket);
         const loose = vpip - nv;
         const aggr = pfr / Math.max(0.01, vpip);
@@ -957,7 +959,7 @@
         bluffFor: (ratio) => {
           const big = ratio >= 0.6;
           const overall = stat("bluffShare");
-          const mean = Math.min(0.9, Math.max(0.02, overall + (big ? 0.04 : -0.04)));
+          const mean = overall;
           const [hits, opps] = s.counts[big ? "bluffShareBig" : "bluffShareSmall"] ?? [0, 0];
           const k = PRIORS.bluffShareBig[1];
           return (hits + mean * k) / (opps + k);
@@ -1178,7 +1180,7 @@
     return Math.min(0.95, pfr * factor);
   }
   function sizeNarrowing(ratio) {
-    return Math.min(1.25, Math.max(0.2, Math.pow(1.66 / (1 + Math.max(0, ratio)), 0.7)));
+    return Math.min(1.15, Math.max(0.4, Math.pow(1.66 / (1 + Math.max(0, ratio)), 0.4)));
   }
   function sizeAdjustedContinue(base, ratio, refRatio = 0.66) {
     const mdf = (r) => 1 / (1 + r);
@@ -1348,8 +1350,12 @@
     };
     const eqAll = equityVs(ctx, ranges);
     const options = buildOptions(ctx, eqAll);
-    options.sort((a, b) => b.ev - a.ev);
+    const T = opts.riskTolerance;
+    for (const o of options) o.score = T ? o.ev - (o.variance ?? 0) / (2 * T) : o.ev;
+    options.sort((a, b) => b.score - a.score);
     const best = options[0];
+    const bestByEv = options.reduce((x, y) => y.ev > x.ev ? y : x);
+    const carefulNote = T && bestByEv !== best ? [`Careful mode: ${best.label} instead of ${bestByEv.label} (${bestByEv.ev >= 0 ? "+" : ""}${fmt(bestByEv.ev)} chips) to avoid a big swing`] : [];
     const limpSpot = ctx.preflop && ctx.raises === 0;
     const potOdds = ctx.toCall > 0 && !limpSpot ? ctx.toCall / (s.pot + ctx.toCall) : 0;
     const villainViews = villains.map((v, i) => ({
@@ -1372,6 +1378,7 @@
       pot: s.pot,
       potOdds,
       reasons: [
+        ...carefulNote,
         ...useReads2 ? [] : ["Reads off: everyone treated as a typical player"],
         ...boardReasons(ctx, villainViews, notes),
         ...explain(ctx, best, options, eqAll, potOdds)
@@ -1379,7 +1386,7 @@
       boardNotes: notes,
       villains: villainViews,
       heroCards: cardsToString(heroCards),
-      confident: !useReads2 || profiles.every((p) => p.hands >= 25),
+      confident: !useReads2 || profiles.every((p) => p.hands >= 100),
       usedReads: useReads2
     };
   }
@@ -1396,10 +1403,10 @@
   function realization(ctx, allInNow, eq = 0.5) {
     if (allInNow || ctx.s.street === "river") return 1;
     let base;
-    if (ctx.preflop) base = ctx.heroInPosition ? 1.02 : ctx.hero.position === "SB" ? 0.7 : 0.8;
+    if (ctx.preflop) base = ctx.heroInPosition ? 1.02 : ctx.hero.position === "SB" ? 0.7 : 0.84;
     else base = ctx.heroInPosition ? 1 : 0.85;
-    const byStrength = Math.min(1.12, Math.max(0.8, 0.75 + 0.5 * eq));
-    return Math.min(1.12, base * byStrength);
+    const byStrength = ctx.preflop ? Math.min(1.15, Math.max(0.72, 0.55 + 0.9 * eq)) : Math.min(1.12, Math.max(0.8, 0.75 + 0.5 * eq));
+    return Math.min(1.15, base * byStrength);
   }
   function baseContinue(ctx, i) {
     const p = ctx.profiles[i];
@@ -1476,19 +1483,25 @@
     const maxTo = hero.committedStreet + hero.stack;
     const allInNow = (added) => added >= hero.stack;
     if (toCall <= 0) {
-      out.push({ action: "check", added: 0, allIn: false, ev: checkEV(ctx, eqAll), label: "Check" });
+      out.push({ action: "check", added: 0, allIn: false, ev: checkEV(ctx, eqAll), label: "Check", variance: eqAll * (1 - eqAll) * s.pot ** 2 * 0.5 });
     } else {
       out.push({ action: "fold", added: 0, allIn: false, ev: 0, label: "Fold" });
       const limp = ctx.preflop && ctx.raises === 0;
       const label = allInNow(toCall) ? `Call all-in (${toCall})` : limp ? hero.position === "SB" && s.currentBet - hero.committedStreet < ctx.bb ? `Complete ${toCall}` : `Limp ${toCall}` : `Call ${toCall}`;
-      out.push({ action: "call", added: toCall, allIn: allInNow(toCall), ev: callEV(ctx, eqAll), label });
+      out.push({ action: "call", added: toCall, allIn: allInNow(toCall), ev: callEV(ctx, eqAll), label, variance: eqAll * (1 - eqAll) * (s.pot + toCall) ** 2 });
     }
     const canRaise = hero.stack > toCall && ctx.villains.some((v) => !v.allIn && v.stack > 0);
     if (!canRaise) return out;
     const minTo = s.currentBet > 0 ? s.currentBet + Math.max(s.lastRaiseSize, ctx.bb) : ctx.bb;
     const targets = /* @__PURE__ */ new Set();
+    const step = ctx.bb >= 10 ? 5 : 1;
+    const tidy = (t) => {
+      let to = s.currentBet + Math.round((t - s.currentBet) / step) * step;
+      if (to < minTo) to = s.currentBet + Math.ceil((minTo - s.currentBet) / step) * step;
+      return Math.min(maxTo, to);
+    };
     for (const t of sizeTargets(ctx)) {
-      const to = Math.round(Math.min(maxTo, Math.max(minTo, t)));
+      const to = tidy(t);
       if (to > s.currentBet) targets.add(to);
     }
     targets.add(maxTo);
@@ -1511,6 +1524,7 @@
         ev: o.ev,
         foldProb: o.foldProb,
         equityWhenCalled: o.eqCalled,
+        variance: (1 - o.foldProb) * o.eqCalled * (1 - o.eqCalled) * (s.pot + 2 * Math.max(0, risk)) ** 2 + o.foldProb * (1 - o.foldProb) * (s.pot + Math.max(0, risk)) ** 2,
         label: isAllIn ? `All-in (${to})` : `${action === "bet" ? "Bet" : "Raise to"} ${to} (${sizeNote})`
       });
     }
@@ -1907,6 +1921,7 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
       this.root.addEventListener("change", (e) => {
         const t = e.target;
         if (t.dataset.act === "reads") this.actions.setUseReads(t.checked);
+        if (t.dataset.act === "careful") this.actions.setCareful(t.checked);
         if (t.id === "pb-import") {
           const file = t.files?.[0];
           if (file) void file.text().then((txt) => this.actions.importData(txt));
@@ -1964,6 +1979,7 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
     advice = null;
     thinking = false;
     useReads = true;
+    careful = false;
     detailsOpen = false;
     saveLayout() {
       try {
@@ -2043,6 +2059,9 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
     setUseReads(on) {
       this.useReads = on;
     }
+    setCareful(on) {
+      this.careful = on;
+    }
     render(s, model2, ledger) {
       this.setStatus(s.handActive ? `hand ${s.handNumber} \xB7 ${s.street} \xB7 ${s.sb}/${s.bb}${s.paused ? " \xB7 paused" : ""}` : s.players.length ? "between hands" : "waiting for game\u2026");
       this.renderAdvice(s);
@@ -2102,6 +2121,8 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
       <div class="sect">Advice</div>
       <label class="toggle"><input type="checkbox" data-act="reads" ${this.useReads ? "checked" : ""}> Use reads on mates</label>
       <div class="muted">Off: ignore what's been learned and treat everyone as a typical player.</div>
+      <label class="toggle" style="margin-top:8px"><input type="checkbox" data-act="careful" ${this.careful ? "checked" : ""}> Careful with big pots</label>
+      <div class="muted">Small pots play as normal; a big all-in or coin flip needs a clear edge before it's suggested. Costs a little in the long run, keeps nights steadier.</div>
       <div class="sect">Your data</div>
       <div class="muted">Everything the bot learns is stored in this browser. Back it up before reinstalling Chrome or clearing site data.</div>
       <div class="row"><button class="btn" data-act="export">Back up</button><button class="btn" data-act="import">Restore\u2026</button>
@@ -2842,6 +2863,8 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
   var started = Date.now();
   var ledgerRestored = false;
   var useReads = true;
+  var careful = false;
+  var CAREFUL_TOLERANCE = 2e3;
   var overlay = new Overlay({
     resetLedger() {
       tracker.resetLedger();
@@ -2862,7 +2885,13 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
     setUseReads(on) {
       useReads = on;
       overlay.setUseReads(on);
-      storage?.set({ [SETTINGS_KEY]: { useReads } });
+      storage?.set({ [SETTINGS_KEY]: { useReads, careful } });
+      recomputeAdvice();
+    },
+    setCareful(on) {
+      careful = on;
+      overlay.setCareful(on);
+      storage?.set({ [SETTINGS_KEY]: { useReads, careful } });
       recomputeAdvice();
     },
     createPerson(label) {
@@ -2887,7 +2916,7 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
       peopleChanged();
     },
     exportData() {
-      const data = { app: "poker-bot", version: 1, savedAt: (/* @__PURE__ */ new Date()).toISOString(), model: model.toJSON(), settings: { useReads } };
+      const data = { app: "poker-bot", version: 1, savedAt: (/* @__PURE__ */ new Date()).toISOString(), model: model.toJSON(), settings: { useReads, careful } };
       const a = document.createElement("a");
       a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], { type: "application/json" }));
       a.download = `poker-bot-backup-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.json`;
@@ -2917,6 +2946,10 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
     if (settings?.useReads === false) {
       useReads = false;
       overlay.setUseReads(false);
+    }
+    if (settings?.careful) {
+      careful = true;
+      overlay.setCareful(true);
     }
     render();
   });
@@ -2962,7 +2995,7 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
     setTimeout(() => {
       if (token !== adviceToken) return;
       try {
-        overlay.setAdvice(advise(tracker.state, model, { useReads }));
+        overlay.setAdvice(advise(tracker.state, model, { useReads, riskTolerance: careful ? CAREFUL_TOLERANCE : void 0 }));
       } catch (e) {
         console.warn("[poker-bot] advice failed", e);
       }

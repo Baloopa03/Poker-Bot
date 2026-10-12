@@ -87,6 +87,7 @@ export interface OverlayActions {
   resetLedger(): void;
   saveCapture(): void;
   setUseReads(on: boolean): void;
+  setCareful(on: boolean): void;
   /** Create a person (e.g. "Isaiah"); returns their key. */
   createPerson(label: string): string;
   /** Put an in-game name (and its history) under a person. */
@@ -106,6 +107,7 @@ export class Overlay {
   private advice: Advice | null = null;
   private thinking = false;
   private useReads = true;
+  private careful = false;
   private detailsOpen = false;
 
   constructor(private readonly actions: OverlayActions) {
@@ -165,6 +167,7 @@ export class Overlay {
     this.root.addEventListener("change", (e) => {
       const t = e.target as HTMLInputElement | HTMLSelectElement;
       if (t.dataset.act === "reads") this.actions.setUseReads((t as HTMLInputElement).checked);
+      if (t.dataset.act === "careful") this.actions.setCareful((t as HTMLInputElement).checked);
       if (t.id === "pb-import") {
         const file = (t as HTMLInputElement).files?.[0];
         if (file) void file.text().then((txt) => this.actions.importData(txt));
@@ -308,6 +311,10 @@ export class Overlay {
     this.useReads = on;
   }
 
+  setCareful(on: boolean): void {
+    this.careful = on;
+  }
+
   render(s: TableState, model: OpponentModel, ledger: LedgerEntry[]): void {
     this.setStatus(s.handActive ? `hand ${s.handNumber} · ${s.street} · ${s.sb}/${s.bb}${s.paused ? " · paused" : ""}` : s.players.length ? "between hands" : "waiting for game…");
     this.renderAdvice(s);
@@ -377,6 +384,8 @@ export class Overlay {
       <div class="sect">Advice</div>
       <label class="toggle"><input type="checkbox" data-act="reads" ${this.useReads ? "checked" : ""}> Use reads on mates</label>
       <div class="muted">Off: ignore what's been learned and treat everyone as a typical player.</div>
+      <label class="toggle" style="margin-top:8px"><input type="checkbox" data-act="careful" ${this.careful ? "checked" : ""}> Careful with big pots</label>
+      <div class="muted">Small pots play as normal; a big all-in or coin flip needs a clear edge before it's suggested. Costs a little in the long run, keeps nights steadier.</div>
       <div class="sect">Your data</div>
       <div class="muted">Everything the bot learns is stored in this browser. Back it up before reinstalling Chrome or clearing site data.</div>
       <div class="row"><button class="btn" data-act="export">Back up</button><button class="btn" data-act="import">Restore…</button>

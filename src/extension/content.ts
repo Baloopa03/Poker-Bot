@@ -18,6 +18,9 @@ const capture: Packet[] = [];
 const started = Date.now();
 let ledgerRestored = false;
 let useReads = true;
+let careful = false;
+/** Chips of swing careful mode tolerates (100 chips = $1). */
+const CAREFUL_TOLERANCE = 2000;
 
 const overlay = new Overlay({
   resetLedger() {
@@ -39,7 +42,13 @@ const overlay = new Overlay({
   setUseReads(on) {
     useReads = on;
     overlay.setUseReads(on);
-    storage?.set({ [SETTINGS_KEY]: { useReads } });
+    storage?.set({ [SETTINGS_KEY]: { useReads, careful } });
+    recomputeAdvice();
+  },
+  setCareful(on) {
+    careful = on;
+    overlay.setCareful(on);
+    storage?.set({ [SETTINGS_KEY]: { useReads, careful } });
     recomputeAdvice();
   },
   createPerson(label) {
@@ -64,7 +73,7 @@ const overlay = new Overlay({
     peopleChanged();
   },
   exportData() {
-    const data = { app: "poker-bot", version: 1, savedAt: new Date().toISOString(), model: model.toJSON(), settings: { useReads } };
+    const data = { app: "poker-bot", version: 1, savedAt: new Date().toISOString(), model: model.toJSON(), settings: { useReads, careful } };
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], { type: "application/json" }));
     a.download = `poker-bot-backup-${new Date().toISOString().slice(0, 10)}.json`;
@@ -92,10 +101,14 @@ const storage = typeof chrome !== "undefined" ? chrome.storage?.local : undefine
 
 storage?.get([MODEL_KEY, SETTINGS_KEY]).then((v) => {
   if (v[MODEL_KEY]) model = OpponentModel.fromJSON(v[MODEL_KEY]);
-  const settings = v[SETTINGS_KEY] as { useReads?: boolean } | undefined;
+  const settings = v[SETTINGS_KEY] as { useReads?: boolean; careful?: boolean } | undefined;
   if (settings?.useReads === false) {
     useReads = false;
     overlay.setUseReads(false);
+  }
+  if (settings?.careful) {
+    careful = true;
+    overlay.setCareful(true);
   }
   render();
 });
@@ -146,7 +159,7 @@ function recomputeAdvice(): void {
   setTimeout(() => {
     if (token !== adviceToken) return;
     try {
-      overlay.setAdvice(advise(tracker.state, model, { useReads }));
+      overlay.setAdvice(advise(tracker.state, model, { useReads, riskTolerance: careful ? CAREFUL_TOLERANCE : undefined }));
     } catch (e) {
       console.warn("[poker-bot] advice failed", e);
     }

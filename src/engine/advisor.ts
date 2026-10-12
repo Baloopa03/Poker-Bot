@@ -27,6 +27,10 @@ export interface AdviceOption {
   foldProb?: number;
   /** Hero equity when called (aggressive options). */
   equityWhenCalled?: number;
+  /** Rough variance of the result in chips², used by careful mode. */
+  variance?: number;
+  /** What the option is ranked by: EV, minus a risk charge in careful mode. */
+  score?: number;
 }
 
 export interface VillainView {
@@ -71,6 +75,13 @@ export interface AdvisorOptions {
    * as a typical player (default assumptions only).
    */
   useReads?: boolean;
+  /**
+   * Careful mode: chips of swing you're comfortable with. Options are ranked
+   * by EV − variance / (2 × tolerance) (the standard mean–variance trade-off),
+   * so small pots play as normal but big coin flips need a real edge.
+   * Undefined = rank purely by expected chips (best long-run result).
+   */
+  riskTolerance?: number;
 }
 
 const POSTFLOP_ORDER: Record<Position, number> = { SB: 0, BB: 1, UTG: 2, MP: 3, CO: 4, BTN: 5 };
@@ -147,8 +158,15 @@ export function advise(s: TableState, learned: OpponentModel, opts: AdvisorOptio
 
   const eqAll = equityVs(ctx, ranges);
   const options = buildOptions(ctx, eqAll);
-  options.sort((a, b) => b.ev - a.ev);
+  const T = opts.riskTolerance;
+  for (const o of options) o.score = T ? o.ev - (o.variance ?? 0) / (2 * T) : o.ev;
+  options.sort((a, b) => b.score! - a.score!);
   const best = options[0];
+  const bestByEv = options.reduce((x, y) => (y.ev > x.ev ? y : x));
+  const carefulNote =
+    T && bestByEv !== best
+      ? [`Careful mode: ${best.label} instead of ${bestByEv.label} (${bestByEv.ev >= 0 ? "+" : ""}${fmt(bestByEv.ev)} chips) to avoid a big swing`]
+      : [];
 
   const limpSpot = ctx.preflop && ctx.raises === 0;
   const potOdds = ctx.toCall > 0 && !limpSpot ? ctx.toCall / (s.pot + ctx.toCall) : 0;
@@ -173,6 +191,7 @@ export function advise(s: TableState, learned: OpponentModel, opts: AdvisorOptio
     pot: s.pot,
     potOdds,
     reasons: [
+      ...carefulNote,
       ...(useReads ? [] : ["Reads off: everyone treated as a typical player"]),
       ...boardReasons(ctx, villainViews, notes),
       ...explain(ctx, best, options, eqAll, potOdds),
@@ -180,7 +199,7 @@ export function advise(s: TableState, learned: OpponentModel, opts: AdvisorOptio
     boardNotes: notes,
     villains: villainViews,
     heroCards: cardsToString(heroCards),
-    confident: !useReads || profiles.every((p) => p.hands >= 25),
+    confident: !useReads || profiles.every((p) => p.hands >= 100),
     usedReads: useReads,
   };
 }
@@ -207,10 +226,12 @@ function realization(ctx: Ctx, allInNow: boolean, eq = 0.5): number {
   // Typical realisation (solver studies): in position ~100–110% of raw equity,
   // big blind out of position ~60–75%, small blind (worst seat) a bit lower.
   let base: number;
-  if (ctx.preflop) base = ctx.heroInPosition ? 1.02 : ctx.hero.position === "SB" ? 0.7 : 0.8;
+  if (ctx.preflop) base = ctx.heroInPosition ? 1.02 : ctx.hero.position === "SB" ? 0.7 : 0.84;
   else base = ctx.heroInPosition ? 1.0 : 0.85;
-  const byStrength = Math.min(1.12, Math.max(0.8, 0.75 + 0.5 * eq));
-  return Math.min(1.12, base * byStrength);
+  // Strong hands over-realise, weak ones under-realise. Preflop the spread is
+  // wider: weak offsuit hands get bet off the pot or dominated far more often.
+  const byStrength = ctx.preflop ? Math.min(1.15, Math.max(0.72, 0.55 + 0.9 * eq)) : Math.min(1.12, Math.max(0.8, 0.75 + 0.5 * eq));
+  return Math.min(1.15, base * byStrength);
 }
 
 /** How often this villain continues vs a ~2/3-pot bet / standard raise in the current spot. */
@@ -314,7 +335,7 @@ function buildOptions(ctx: Ctx, eqAll: number): AdviceOption[] {
 
   // Passive options.
   if (toCall <= 0) {
-    out.push({ action: "check", added: 0, allIn: false, ev: checkEV(ctx, eqAll), label: "Check" });
+    out.push({ action: "check", added: 0, allIn: false, ev: checkEV(ctx, eqAll), label: "Check", variance: eqAll * (1 - eqAll) * s.pot ** 2 * 0.5 });
   } else {
     out.push({ action: "fold", added: 0, allIn: false, ev: 0, label: "Fold" });
     const limp = ctx.preflop && ctx.raises === 0;
@@ -323,7 +344,7 @@ function buildOptions(ctx: Ctx, eqAll: number): AdviceOption[] {
       : limp
         ? hero.position === "SB" && s.currentBet - hero.committedStreet < ctx.bb ? `Complete ${toCall}` : `Limp ${toCall}`
         : `Call ${toCall}`;
-    out.push({ action: "call", added: toCall, allIn: allInNow(toCall), ev: callEV(ctx, eqAll), label });
+    out.push({ action: "call", added: toCall, allIn: allInNow(toCall), ev: callEV(ctx, eqAll), label, variance: eqAll * (1 - eqAll) * (s.pot + toCall) ** 2 });
   }
 
   // Aggressive options.
@@ -331,8 +352,16 @@ function buildOptions(ctx: Ctx, eqAll: number): AdviceOption[] {
   if (!canRaise) return out;
   const minTo = s.currentBet > 0 ? s.currentBet + Math.max(s.lastRaiseSize, ctx.bb) : ctx.bb;
   const targets = new Set<number>();
+  // Round what you type into the raise box (amount on top of the current bet)
+  // to a tidy multiple of 5, never below a legal raise.
+  const step = ctx.bb >= 10 ? 5 : 1;
+  const tidy = (t: number) => {
+    let to = s.currentBet + Math.round((t - s.currentBet) / step) * step;
+    if (to < minTo) to = s.currentBet + Math.ceil((minTo - s.currentBet) / step) * step;
+    return Math.min(maxTo, to);
+  };
   for (const t of sizeTargets(ctx)) {
-    const to = Math.round(Math.min(maxTo, Math.max(minTo, t)));
+    const to = tidy(t);
     if (to > s.currentBet) targets.add(to);
   }
   targets.add(maxTo);
@@ -361,6 +390,9 @@ function buildOptions(ctx: Ctx, eqAll: number): AdviceOption[] {
       ev: o.ev,
       foldProb: o.foldProb,
       equityWhenCalled: o.eqCalled,
+      variance:
+        (1 - o.foldProb) * o.eqCalled * (1 - o.eqCalled) * (s.pot + 2 * Math.max(0, risk)) ** 2 +
+        o.foldProb * (1 - o.foldProb) * (s.pot + Math.max(0, risk)) ** 2,
       label: isAllIn ? `All-in (${to})` : `${action === "bet" ? "Bet" : "Raise to"} ${to} (${sizeNote})`,
     });
   }

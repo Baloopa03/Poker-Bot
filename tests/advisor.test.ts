@@ -152,7 +152,7 @@ describe("opponent model", () => {
     expect(p.stat("vpip")).toBeCloseTo(0.47);
     expect(m.profile("x", "x", 2).stat("vpip")).toBeCloseTo(0.75); // heads-up is much looser
     expect(m.profile("x", "x", 6).stat("vpip")).toBeCloseTo(0.25);
-    for (let i = 0; i < 40; i++)
+    for (let i = 0; i < 100; i++)
       m.update({
         handNumber: i,
         sb: 8,
@@ -375,5 +375,35 @@ describe("EV maths", () => {
     const check = a.options.find((o) => o.action === "check")!;
     expect(check.ev).toBeGreaterThanOrEqual(0);
     expect(check.ev).toBeLessThanOrEqual(a.equity * 100 + 1e-6);
+  });
+});
+
+describe("careful mode and tidy amounts", () => {
+  const allInSpot = (hero: string) => {
+    const s = table({
+      hero,
+      board: "9d 5c 2h",
+      street: "flop",
+      players: [player("me", "s1", "BTN", 600, 0), player("sam", "s2", "SB", 0, 600)],
+      currentBet: 600,
+      pot: 660,
+      actions: [...blinds(), { key: "sam", seat: "s2", street: "flop", type: "bet", added: 600, toTotal: 600, facing: 0, potBefore: 60, raisesBefore: 0, allIn: true }],
+    });
+    s.players[1].allIn = true;
+    return s;
+  };
+
+  it("never picks a riskier option than normal mode, and only gives up EV to cut risk", () => {
+    for (const hero of ["Ah Kd", "Td Th", "6s 7s", "Ac 9h", "Kc Qc"]) {
+      const normal = advise(allInSpot(hero), model, { seed: 31 })!;
+      const careful = advise(allInSpot(hero), model, { seed: 31, riskTolerance: 2000 })!;
+      expect(careful.best.variance ?? 0).toBeLessThanOrEqual((normal.best.variance ?? 0) + 1e-6);
+      if (careful.best.label !== normal.best.label) expect(careful.best.ev).toBeLessThanOrEqual(normal.best.ev);
+    }
+  });
+
+  it("rounds raise-box amounts to multiples of 5", () => {
+    const a = advise(unopenedButton("As Ah"), model, { seed: 1 })!;
+    for (const o of a.options) if (o.toTotal !== undefined && !o.allIn) expect((o.toTotal - 15) % 5).toBe(0);
   });
 });

@@ -49,30 +49,39 @@ const PREFLOP_PRIORS: Record<TableBucket, Partial<Record<StatName, number>>> = {
   "6": { vpip: 0.25, pfr: 0.2, limp: 0.05, steal: 0.4, foldToSteal: 0.6, threeBet: 0.08, foldTo3Bet: 0.5, callOpen: 0.2 },
 };
 
+/**
+ * Prior strength = how many observations a stat needs before a player's own
+ * record outweighs the default. Set from how fast each stat stabilises in
+ * tracking-software experience: preflop open/raise rates within ~30–100 hands,
+ * re-raise and steal stats several hundred, postflop folding and bluffing
+ * stats much longer. Weak priors make a bot overreact to a handful of hands.
+ */
 export const PRIORS: Record<StatName, [number, number]> = {
-  vpip: [0.47, 12],
-  pfr: [0.36, 12],
-  limp: [0.08, 8],
-  steal: [0.55, 8],
-  foldToSteal: [0.45, 8],
-  threeBet: [0.13, 10],
-  foldTo3Bet: [0.45, 6],
-  callOpen: [0.3, 8],
-  cbet: [0.55, 8],
-  foldToCbet: [0.4, 8],
-  foldToBetFlop: [0.4, 8],
-  foldToBetTurn: [0.4, 8],
-  foldToBetRiver: [0.4, 8],
-  raiseVsBet: [0.1, 10],
-  betWhenCheckedTo: [0.4, 8],
+  vpip: [0.47, 25],
+  pfr: [0.36, 25],
+  limp: [0.08, 25],
+  steal: [0.55, 25],
+  foldToSteal: [0.45, 30],
+  threeBet: [0.13, 40],
+  foldTo3Bet: [0.45, 30],
+  callOpen: [0.3, 30],
+  cbet: [0.55, 30],
+  foldToCbet: [0.4, 30],
+  foldToBetFlop: [0.4, 35],
+  foldToBetTurn: [0.4, 35],
+  foldToBetRiver: [0.4, 35],
+  raiseVsBet: [0.1, 40],
+  betWhenCheckedTo: [0.4, 30],
   // Betting out into the previous street's aggressor ("donk"/lead): rare.
-  lead: [0.1, 8],
-  wtsd: [0.3, 8],
-  wonAtShowdown: [0.5, 8],
-  bluffShare: [0.3, 6],
-  // Per bet size (small < 0.6 pot ≤ big); priors come from the player's overall bluff share, see profile().
-  bluffShareSmall: [0.26, 6],
-  bluffShareBig: [0.34, 6],
+  lead: [0.1, 30],
+  wtsd: [0.3, 40],
+  wonAtShowdown: [0.5, 40],
+  bluffShare: [0.3, 25],
+  // Per bet size (small < 0.6 pot ≤ big). Theory says bigger bets carry more
+  // bluffs, coaching experience says recreational players' big bets carry
+  // fewer; with no consensus, size starts neutral and is learned per player.
+  bluffShareSmall: [0.3, 25],
+  bluffShareBig: [0.3, 25],
 };
 
 export function prior(stat: StatName, bucket: TableBucket): [number, number] {
@@ -106,8 +115,8 @@ export interface Profile {
   foldToBet(street: Street): number;
   /**
    * Share of this player's bets/raises of this size that are bluffs. Starts
-   * from theory (bigger bets carry a few more bluffs) around their overall
-   * bluff share, then follows what their showdowns reveal at each size.
+   * at their overall bluff share (size alone isn't assumed to mean anything),
+   * then follows what their showdowns reveal at each size.
    */
   bluffFor(sizeRatio: number): number;
   style: string;
@@ -317,7 +326,7 @@ export class OpponentModel {
     const pfr = stat("pfr");
     const fold = (stat("foldToBetFlop") + stat("foldToBetTurn") + stat("foldToBetRiver")) / 3;
     let style = "unknown (few hands)";
-    if (s.hands >= 15) {
+    if (s.hands >= 40) {
       // Compare with what's normal for this table size.
       const [nv] = prior("vpip", bucket);
       const loose = vpip - nv;
@@ -338,7 +347,7 @@ export class OpponentModel {
       bluffFor: (ratio: number) => {
         const big = ratio >= 0.6;
         const overall = stat("bluffShare");
-        const mean = Math.min(0.9, Math.max(0.02, overall + (big ? 0.04 : -0.04)));
+        const mean = overall; // neutral until their showdowns say otherwise
         const [hits, opps] = s.counts[big ? "bluffShareBig" : "bluffShareSmall"] ?? [0, 0];
         const k = PRIORS.bluffShareBig[1];
         return (hits + mean * k) / (opps + k);

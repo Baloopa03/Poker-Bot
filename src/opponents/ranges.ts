@@ -86,7 +86,9 @@ function openFraction(profile: Profile, position: Position | undefined, players:
  * very top of their range, or a bluff), slightly wider for small bets.
  */
 export function sizeNarrowing(ratio: number): number {
-  return Math.min(1.25, Math.max(0.2, Math.pow(1.66 / (1 + Math.max(0, ratio)), 0.7)));
+  // Deliberately mild: people's bet sizes are only partly tied to hand
+  // strength. A player's own showdowns (bluff share by size) add the rest.
+  return Math.min(1.15, Math.max(0.4, Math.pow(1.66 / (1 + Math.max(0, ratio)), 0.4)));
 }
 
 /** Continue frequency vs a bet of `ratio` × pot, from a base frequency measured around 2/3 pot. */

@@ -193,68 +193,94 @@ Either way the Adapter outputs neutral events (`HandStarted`, `HoleCards`,
 `PlayerAction`, `BoardDealt`, `Showdown`, `HandEnded`) and the rest of the
 bot never touches pokerpatio code.
 
-## 5. The Engine (the brain)
+## 5. The Engine (the brain) — as implemented
+
+> This section describes what `src/engine/advisor.ts`, `src/opponents/*` and
+> `src/engine/strength.ts` actually do. (The original plan had a simpler
+> one-street formula; it was replaced.)
+
+All EVs are **chips won relative to folding now**. `pot` always includes every
+chip already committed, including the bet you face. `R` is equity realisation.
 
 ### 5.1 Hand evaluation and equity
-- A fast 7-card hand evaluator (lookup-table based).
-- **Monte Carlo equity:** deal random opponent hands *weighted by their
-  estimated ranges*, run out the board about 5–20k times in a web worker, and
-  return our win/tie probability. The target is under 100 ms per decision.
+- Exact 5–7 card evaluator (checked against all 2,598,960 five-card hands).
+- Equity vs weighted ranges: Monte Carlo (≈2,500 samples) on flop/turn, exact
+  enumeration heads-up on the river.
+- `equityVsRange`: for every possible opponent hand, its equity against a
+  whole range, with exact card removal (blockers). Used to decide who calls.
 
-### 5.2 Preflop
-- Starting ranges for each position, tuned for **3-handed** play (much wider
-  than full-ring play), stored as editable 13×13 grids in JSON.
-- Separate charts for open, call vs open, 3-bet and push/fold when short-stacked
-  (under about 12 BB).
-- Exploit adjustments widen or tighten these based on opponent stats (§6).
-- **Our usual game:** 8/15 blinds, $500 starting stacks, so we start about
-  **33 BB deep**. That's shallow: stack-to-pot ratios are low and all-in
-  decisions come up often, so push/fold and commitment logic matter more
-  than deep-stack play. Blinds and stacks can change, so the engine works
-  in big blinds read from the live state, never in hard-coded dollar amounts.
-
-### 5.3 Postflop
-For each legal option (fold, check/call, bet or raise at a few sizes such as
-33%, 66%, 100% and all-in):
-
+### 5.2 The option formulas
 ```
 EV(fold)  = 0
-EV(call)  = equity × (pot + call) − call
-EV(bet x) = P(fold) × pot
-          + (1 − P(fold)) × [equity_when_called × (pot + 2x) − x]
+EV(call)  = R · eq · (pot + call) − call
+            (pot already holds their bet: you pay `call` once, win the pot plus your call)
+            players still to act behind are enumerated: each folds or continues
+EV(limp)  = P(nobody raises) · [R · eq_vs_checkers · (pot + call) − call] + P(raise) · (−call)
+EV(check) heads-up out of position: model their reply —
+            P(bet) · max(0, R · eq_vs_betting · (pot + 2b) − b) + P(check) · R · eq_vs_checkers · pot
+          in position / river: R · eq · pot (river checked behind = showdown)
+EV(bet/raise to x), enumerating which opponents continue (independent):
+            all fold:            + pot
+            one caller c:        (1 − P(raise)) · [R · eq_vs_flatters · final_pot − risk]
+                                 + P(raise) · max(−risk, R · eq_vs_raisers · pot_if_called − total_risk)
+            several callers:     R · eq_vs_continuers · final_pot − risk   (side-pot caps applied)
 ```
-- `P(fold)` comes from the opponent model (their fold-to-bet stat at this street and size).
-- `equity_when_called` uses the opponent's range after narrowing it to the hands that continue.
-- Recommend the option with the highest EV. Show the runner-up when it's close.
+- `risk` is capped by the largest stack that can call (side-pot logic).
+- Small penalties keep near-ties on the smaller size: 1.5% of chips risked,
+  plus 4% of anything over pot, plus 3% per street left of anything over 2× pot
+  (overbets forfeit the value of being paid later, which one street can't see).
+- Optional **careful mode** ranks by `EV − variance / (2 · tolerance)`
+  (mean–variance trade-off; tolerance 2,000 chips), so big coin flips need a
+  real edge while small pots play normally.
 
-This is a deliberately simple one-street model. We can add multi-street
-lookahead later if it isn't strong enough.
+### 5.3 Equity realisation `R`
+Solver studies put in-position players at ~100–110% of raw equity and the big
+blind at ~60–75%. The bot uses a base by seat (preflop: IP 1.02, BB 0.84, SB
+0.70; postflop: IP 1.0, OOP 0.85), scaled by hand strength (strong hands
+over-realise, weak ones under-realise; steeper preflop), ×0.96 per extra
+caller, and exactly 1 when all-in or on the river.
+
+### 5.4 Who calls a bet (fold equity)
+Each opponent hand's probability of continuing is a 50/50 blend of:
+1. **Pot odds vs what your bet represents:** its equity against the range a
+   player would put *you* on after this bet (`perceivedHeroRange`, from your
+   own profile), vs the price `need = call / (pot + your bet + call)`, shifted
+   by how sticky this player is.
+2. **Their actual habits:** their fold-to-bet record on this street (scaled
+   gently for size), plus "decent hands rarely fold".
+
+Preflop, fold-to-steal / fold-to-3-bet are measured at standard sizes, so a
+size is judged relative to the standard size for that spot. In 3-handed pots
+the small blind defends steals about half as often as the big blind.
+
+### 5.5 Preflop
+No fixed charts: the same EV machinery decides open/limp/call/3-bet/shove.
+Checked against researched ranges (`scripts/diag-preflop.ts`): 3-handed button
+opens ≈45%, big blind defends ≈58% vs a 2.5× open, small blind vs button
+mostly 3-bet-or-fold; heads-up button ≈95% played, big blind defends ≈66%.
+Bet amounts are rounded so the raise-box amount is a multiple of 5.
 
 ## 6. Opponent model (the exploit part)
 
-We only play two opponents, so the bot gets very good data on them quickly.
+**Stats tracked per person** (People tab links guest names to people): VPIP,
+PFR, limp, steal, fold to steal, 3-bet, fold to 3-bet, call vs open, c-bet,
+fold to c-bet, fold to bet (flop/turn/river), raise vs bet, bet when checked
+to, lead (betting into the aggressor), WTSD, won at showdown, bluff share
+(overall and by bet size, learned from shown hands, including hands shown
+after folding). Preflop stats are kept per table size (heads-up, 3–4, 5+).
 
-**Stats tracked per player** (saved in IndexedDB, kept across sessions):
-| Stat | Meaning |
-|---|---|
-| VPIP | % of hands they voluntarily put money in |
-| PFR | % of hands they raise preflop |
-| 3-bet % | how often they re-raise |
-| Fold to 3-bet | |
-| C-bet % / Fold to c-bet | betting the flop after raising preflop, and folding to it |
-| Aggression factor | (bets + raises) / calls |
-| WTSD / W$SD | how often they reach showdown, and how often they win there |
-| Bet sizing tells | e.g. "big bet on the river = strong 85% of the time" |
+**Small samples:** each stat is blended with a theory-based default. The
+default's weight (25–40 pseudo-observations) follows how slowly each stat
+stabilises in practice, so a handful of hands can't swing the advice.
 
-**Range estimation:** start each opponent at "any two cards". On each action,
-re-weight every possible hand by how likely that player is to take that action
-with it. Their stats decide how much we narrow it: a loose player's raise
-narrows less than a tight player's. Hands they show down are stored to check
-and calibrate these guesses.
-
-**Small samples:** blend each stat with a sensible default (prior) until we
-have enough hands, so a few hands don't skew the advice. The HUD shows the
-sample size.
+**Range estimation:** each action re-weights every hand by how likely this
+player is to take it:
+- Checking *to the bettor* barely narrows (almost everyone does it);
+  checking when checked to removes some strong hands (but traps remain).
+- Bets are value from the top plus bluffs from the bottom. Bet size is only a
+  mild signal unless this player's showdowns show their sizes mean something.
+- Calls keep everything good enough to continue; only sets/two pair are
+  partly missing (they sometimes raise).
 
 ## 7. Overlay UI
 
