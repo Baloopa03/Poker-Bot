@@ -166,12 +166,14 @@ export function estimateRange(ctx: RangeContext): Range {
       // Bigger bets come from a narrower, stronger slice of the range (plus bluffs).
       const freq = betFreq * sizeNarrowing(ratio);
       const polar = (i: number) => inTop(q[i], freq * (1 - b)) + 0.8 * inBottom(q[i], freq * b);
-      // Checking to the bettor is what nearly everyone does, so it says little.
-      // When checked to, people bet good hands much more often, but still trap
-      // sometimes (so checks never rule strong hands out). And the rare player
-      // who does bet out into the bettor usually has a strong hand or a bluff.
-      if (a.type === "check")
-        reweight(range, (i) => (spot === "lead" ? 1 - Math.min(1, freq * (0.5 + q[i])) : Math.max(0.25, 1 - polar(i))));
+      // Leading out into the bettor: rare, and recreational players do it with
+      // a spread of hands (strong ones more often, but medium hands and bluffs
+      // too). One likelihood for both outcomes keeps the update consistent:
+      // a check barely narrows, a lead shifts the range up without erasing
+      // top pair. When checked to, betting is more strongly value + bluffs.
+      const pLead = (i: number) => Math.min(1, (freq * (0.25 + 1.5 * q[i] * q[i])) / 0.75);
+      if (spot === "lead") reweight(range, (i) => (a.type === "check" ? 1 - pLead(i) : Math.max(0.01, pLead(i))));
+      else if (a.type === "check") reweight(range, (i) => Math.max(0.25, 1 - polar(i)));
       else reweight(range, (i) => Math.max(0.01, polar(i)));
     } else {
       const facingBet = a.type === "call" ? a.added : a.facing - (a.toTotal - a.added);

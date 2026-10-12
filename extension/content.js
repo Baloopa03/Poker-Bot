@@ -1232,8 +1232,9 @@
         const b = a.type === "bet" ? profile.bluffFor(ratio) : bluff;
         const freq = betFreq * sizeNarrowing(ratio);
         const polar = (i) => inTop(q[i], freq * (1 - b)) + 0.8 * inBottom(q[i], freq * b);
-        if (a.type === "check")
-          reweight(range, (i) => spot === "lead" ? 1 - Math.min(1, freq * (0.5 + q[i])) : Math.max(0.25, 1 - polar(i)));
+        const pLead = (i) => Math.min(1, freq * (0.25 + 1.5 * q[i] * q[i]) / 0.75);
+        if (spot === "lead") reweight(range, (i) => a.type === "check" ? 1 - pLead(i) : Math.max(0.01, pLead(i)));
+        else if (a.type === "check") reweight(range, (i) => Math.max(0.25, 1 - polar(i)));
         else reweight(range, (i) => Math.max(0.01, polar(i)));
       } else {
         const facingBet = a.type === "call" ? a.added : a.facing - (a.toTotal - a.added);
