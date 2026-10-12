@@ -503,6 +503,92 @@
     const s = preflopScores();
     return Float64Array.from(CLASS_OF_COMBO, (c) => s.get(c));
   }
+  function equityVsRange(board, range, flopRunouts = 16, seed = 11) {
+    const out = new Float64Array(NUM_COMBOS);
+    const isDead = new Uint8Array(52);
+    for (const c of board) isDead[c] = 1;
+    const runouts = [];
+    if (board.length === 5) runouts.push([]);
+    else if (board.length === 4) {
+      const live = [];
+      for (let c = 0; c < 52; c++) if (!isDead[c]) live.push(c);
+      for (let k = 0; k < live.length; k += 3) runouts.push([live[k]]);
+    } else {
+      const random = rng(seed);
+      const stub = [];
+      for (let c = 0; c < 52; c++) if (!isDead[c]) stub.push(c);
+      for (let k = 0; k < flopRunouts; k++) {
+        const a = stub[random() * stub.length | 0];
+        let b = a;
+        while (b === a) b = stub[random() * stub.length | 0];
+        runouts.push([a, b]);
+      }
+    }
+    const seven = new Int32Array(7);
+    const scores = new Float64Array(NUM_COMBOS);
+    const counted = new Float64Array(NUM_COMBOS);
+    for (const extra of runouts) {
+      const full = [...board, ...extra];
+      for (let k = 0; k < 5; k++) seven[2 + k] = full[k];
+      const used = new Uint8Array(52);
+      for (const c of full) used[c] = 1;
+      const heroIdx = [];
+      for (let i = 0; i < NUM_COMBOS; i++) {
+        const [a, b] = COMBOS[i];
+        if (used[a] || used[b]) {
+          scores[i] = -1;
+          continue;
+        }
+        seven[0] = a;
+        seven[1] = b;
+        scores[i] = evaluate(seven);
+        if (range.w[i] > 0) heroIdx.push(i);
+      }
+      heroIdx.sort((x, y) => scores[x] - scores[y]);
+      const sc = heroIdx.map((i) => scores[i]);
+      const cum = [];
+      let total = 0;
+      for (const i of heroIdx) cum.push(total += range.w[i]);
+      if (total <= 0) continue;
+      const byCard = Array.from({ length: 52 }, () => []);
+      for (const i of heroIdx) {
+        const [a, b] = COMBOS[i];
+        byCard[a].push(i);
+        byCard[b].push(i);
+      }
+      const below = (v, strict) => {
+        let lo = 0;
+        let hi = sc.length;
+        while (lo < hi) {
+          const mid = lo + hi >> 1;
+          if (strict ? sc[mid] < v : sc[mid] <= v) lo = mid + 1;
+          else hi = mid;
+        }
+        return lo === 0 ? 0 : cum[lo - 1];
+      };
+      for (let i = 0; i < NUM_COMBOS; i++) {
+        const v = scores[i];
+        if (v < 0) continue;
+        let lt = below(v, true);
+        let le = below(v, false);
+        let tot = total;
+        const [a, b] = COMBOS[i];
+        for (const card of [a, b])
+          for (const j of byCard[card]) {
+            if (card === b && (COMBOS[j][0] === a || COMBOS[j][1] === a)) continue;
+            const w = range.w[j];
+            tot -= w;
+            if (scores[j] < v) lt -= w;
+            if (scores[j] <= v) le -= w;
+          }
+        if (tot <= 1e-9) continue;
+        out[i] += (lt + (le - lt) / 2) / tot;
+        counted[i]++;
+      }
+    }
+    for (let i = 0; i < NUM_COMBOS; i++) out[i] = counted[i] > 0 ? out[i] / counted[i] : 0;
+    return out;
+  }
 
   // src/engine/texture.ts
   var SUIT_NAMES = ["clubs", "diamonds", "hearts", "spades"];
@@ -657,6 +743,8 @@
     foldToBetRiver: [0.4, 8],
     raiseVsBet: [0.1, 10],
     betWhenCheckedTo: [0.4, 8],
+    // Betting out into the previous street's aggressor ("donk"/lead): rare.
+    lead: [0.1, 8],
     wtsd: [0.3, 8],
     wonAtShowdown: [0.5, 8],
     bluffShare: [0.3, 6],
@@ -954,14 +1042,14 @@
           if (!s) continue;
           const aggressive = a.type === "bet" || a.type === "raise";
           if (!betSeen) {
-            if (street === "flop" && a.key === lastRaiser) this.bump(s, "cbet", aggressive);
-            else this.bump(s, "betWhenCheckedTo", aggressive);
-            if (aggressive && street === "flop" && a.key === lastRaiser) cbetMade = true;
+            const spot = betSpot(h.actions, a);
+            this.bump(s, spot === "cbet" ? "cbet" : spot === "lead" ? "lead" : "betWhenCheckedTo", aggressive);
+            if (aggressive && spot === "cbet") cbetMade = true;
           } else {
             const fs = street === "flop" ? "foldToBetFlop" : street === "turn" ? "foldToBetTurn" : "foldToBetRiver";
             this.bump(s, fs, a.type === "fold");
             this.bump(s, "raiseVsBet", a.type === "raise");
-            if (cbetMade && street === "flop" && a.key !== lastRaiser) this.bump(s, "foldToCbet", a.type === "fold");
+            if (cbetMade && street === "flop") this.bump(s, "foldToCbet", a.type === "fold");
           }
           if (aggressive) betSeen = true;
         }
@@ -1002,6 +1090,19 @@
       }
     }
   };
+  function betSpot(actions, a) {
+    const order = ["preflop", "flop", "turn", "river"];
+    const idx = order.indexOf(a.street);
+    if (idx <= 0) return "checkedTo";
+    const prev = order[idx - 1];
+    const before = actions.slice(0, actions.indexOf(a));
+    const aggressor = [...before].reverse().find((x) => x.street === prev && (x.type === "bet" || x.type === "raise"))?.key;
+    if (!aggressor) return "checkedTo";
+    if (aggressor === a.key) return a.street === "flop" ? "cbet" : "barrel";
+    const aggressorActed = before.some((x) => x.street === a.street && x.key === aggressor);
+    const aggressorFolded = before.some((x) => x.key === aggressor && x.type === "fold");
+    return aggressorActed || aggressorFolded ? "checkedTo" : "lead";
+  }
   function sizeRatio(a) {
     const before = a.toTotal - a.added;
     const callPart = Math.max(0, a.facing - before);
@@ -1079,9 +1180,9 @@
   function sizeNarrowing(ratio) {
     return Math.min(1.25, Math.max(0.2, Math.pow(1.66 / (1 + Math.max(0, ratio)), 0.7)));
   }
-  function sizeAdjustedContinue(base, ratio) {
+  function sizeAdjustedContinue(base, ratio, refRatio = 0.66) {
     const mdf = (r) => 1 / (1 + r);
-    return Math.min(0.97, Math.max(0.03, base * Math.pow(mdf(ratio) / mdf(0.66), 0.85)));
+    return Math.min(0.97, Math.max(0.03, base * Math.pow(mdf(ratio) / mdf(refRatio), 0.85)));
   }
   function estimateRange(ctx) {
     const { profile, key } = ctx;
@@ -1121,21 +1222,22 @@
       const board = boardAt(ctx.board, a.street);
       if (board.length < 3) continue;
       const q = rangePercentiles(range, boardStrengths(board));
-      const isCbetSpot = a.street === "flop" && key === lastPreRaiser;
-      const betFreq = isCbetSpot ? profile.stat("cbet") : profile.stat("betWhenCheckedTo");
+      const spot = betSpot(ctx.actions, a);
+      const betFreq = spot === "cbet" ? profile.stat("cbet") : spot === "lead" ? profile.stat("lead") : profile.stat("betWhenCheckedTo");
       const raiseFreq = profile.stat("raiseVsBet");
       if (a.facing === 0 || a.type === "check" || a.type === "bet") {
         const ratio = a.type === "bet" ? sizeRatio(a) : 0.66;
         const b = a.type === "bet" ? profile.bluffFor(ratio) : bluff;
         const freq = betFreq * sizeNarrowing(ratio);
-        const pBet = (i) => inTop(q[i], freq * (1 - b)) + 0.8 * inBottom(q[i], freq * b);
-        if (a.type === "check") reweight(range, (i) => Math.max(0.25, 1 - pBet(i)));
-        else reweight(range, (i) => Math.max(0.01, pBet(i)));
+        const polar = (i) => inTop(q[i], freq * (1 - b)) + 0.8 * inBottom(q[i], freq * b);
+        if (a.type === "check")
+          reweight(range, (i) => spot === "lead" ? 1 - Math.min(1, freq * (0.5 + q[i])) : Math.max(0.25, 1 - polar(i)));
+        else reweight(range, (i) => Math.max(0.01, polar(i)));
       } else {
         const facingBet = a.type === "call" ? a.added : a.facing - (a.toTotal - a.added);
         const ratio = facingBet / Math.max(1, a.potBefore - facingBet);
         const cont = sizeAdjustedContinue(1 - profile.foldToBet(a.street), ratio);
-        if (a.type === "call") reweight(range, (i) => 0.01 + inTop(q[i], cont) * (1 - 0.6 * inTop(q[i], raiseFreq * 0.7)));
+        if (a.type === "call") reweight(range, (i) => 0.01 + inTop(q[i], cont) * (1 - 0.5 * inTop(q[i], raiseFreq * 0.5)));
         else {
           const ratio2 = sizeRatio(a);
           const b = profile.bluffFor(ratio2);
@@ -1146,28 +1248,31 @@
     }
     return range;
   }
-  function respondToBet(range, board, profile, ratio, baseContinue2) {
+  function respondToBet(range, board, profile, ratio, baseContinue2, opts = {}) {
     const preflop = board.length < 3;
     const strengths = preflop ? preflopComboStrengths() : boardStrengths(board);
-    const q = rangePercentiles(range, strengths);
-    const cont = sizeAdjustedContinue(baseContinue2, ratio);
     const raiseFreq = Math.min(0.5, profile.stat("raiseVsBet"));
-    const sticky = (baseContinue2 - 0.6) * 0.25;
-    const tau = preflop ? Math.min(0.97, 0.8 + 0.05 * Math.log2(1 + ratio) - sticky) : Math.min(0.93, 0.6 + 0.1 * Math.log2(1 + ratio) - sticky);
     const continuing = new Range();
     const raising = new Range();
     let total = 0;
     let kept = 0;
+    const q = rangePercentiles(range, strengths);
+    const cont = sizeAdjustedContinue(baseContinue2, ratio, opts.refRatio);
+    const sticky = (baseContinue2 - 0.6) * 0.25;
+    const rel = opts.refRatio !== void 0 ? Math.max(0, ratio / Math.max(0.05, opts.refRatio) - 1) : ratio;
+    const tau = preflop ? Math.min(0.97, 0.8 + 0.05 * Math.log2(1 + rel) - sticky) : Math.min(0.93, 0.6 + 0.1 * Math.log2(1 + ratio) - sticky);
+    const byFreq = (i) => 1 - (1 - inTop(q[i], cont)) * (1 - sigmoid((strengths[i] - tau) / 0.04));
+    const rational = !preflop && opts.vsBettor && opts.need !== void 0;
+    const shift = (baseContinue2 - 0.6) * 0.5;
+    const eqQ = rational ? rangePercentiles(range, opts.vsBettor) : q;
     for (let i = 0; i < NUM_COMBOS; i++) {
       const w = range.w[i];
       if (w <= 0) continue;
       total += w;
-      const byFreq = inTop(q[i], cont);
-      const byStrength = sigmoid((strengths[i] - tau) / 0.04);
-      const c = 1 - (1 - byFreq) * (1 - byStrength);
+      const c = rational ? 0.5 * byFreq(i) + 0.5 * sigmoid((opts.vsBettor[i] - opts.need + shift) / 0.06) : byFreq(i);
       continuing.w[i] = w * c;
       kept += w * c;
-      raising.w[i] = w * inTop(q[i], raiseFreq * cont);
+      raising.w[i] = w * Math.min(c, inTop(eqQ[i], raiseFreq * Math.max(cont, 0.3)));
     }
     return { fold: total > 0 ? 1 - kept / total : 1, continuing, raising, continueFreq: total > 0 ? kept / total : 0 };
   }
@@ -1237,7 +1342,9 @@
       seed: opts.seed ?? s.handNumber * 7919 + s.board.length * 31 + s.actions.length,
       preflop: s.street === "preflop",
       raises: s.actions.filter((a) => a.street === s.street && (a.type === "raise" || a.type === "bet")).length,
-      heroWasPreflopAggressor: preflopRaisers.length > 0 && preflopRaisers[preflopRaisers.length - 1].key === hero.key
+      heroWasPreflopAggressor: preflopRaisers.length > 0 && preflopRaisers[preflopRaisers.length - 1].key === hero.key,
+      heroProfile: model2.profile(hero.key, hero.name, dealt),
+      dealt
     };
     const eqAll = equityVs(ctx, ranges);
     const options = buildOptions(ctx, eqAll);
@@ -1288,16 +1395,19 @@
   }
   function realization(ctx, allInNow, eq = 0.5) {
     if (allInNow || ctx.s.street === "river") return 1;
-    const base = ctx.preflop ? ctx.heroInPosition ? 0.9 : ctx.hero.position === "SB" ? 0.72 : 0.8 : ctx.heroInPosition ? 0.97 : 0.88;
-    const byStrength = Math.min(1.12, Math.max(0.85, 0.8 + 0.4 * eq));
-    return Math.min(1.1, base * byStrength);
+    let base;
+    if (ctx.preflop) base = ctx.heroInPosition ? 1.02 : ctx.hero.position === "SB" ? 0.7 : 0.8;
+    else base = ctx.heroInPosition ? 1 : 0.85;
+    const byStrength = Math.min(1.12, Math.max(0.8, 0.75 + 0.5 * eq));
+    return Math.min(1.12, base * byStrength);
   }
   function baseContinue(ctx, i) {
     const p = ctx.profiles[i];
     const v = ctx.villains[i];
     if (ctx.preflop) {
       if (ctx.raises === 0) {
-        const defend = v.position === "SB" || v.position === "BB" ? 1 - p.stat("foldToSteal") : p.stat("callOpen") + p.stat("threeBet");
+        const blindDefend = 1 - p.stat("foldToSteal");
+        const defend = v.position === "BB" ? Math.min(0.9, blindDefend * (ctx.headsUp ? 1 : 1.1)) : v.position === "SB" && !ctx.headsUp ? blindDefend * 0.55 : v.position === "SB" ? blindDefend : p.stat("callOpen") + p.stat("threeBet");
         return Math.min(0.9, Math.max(0.1, defend));
       }
       if (ctx.raises === 1) return Math.min(0.9, Math.max(0.15, 1 - p.stat("foldTo3Bet")));
@@ -1307,6 +1417,7 @@
     return 1 - (cbet ? p.stat("foldToCbet") : p.foldToBet(ctx.s.street));
   }
   function callEV(ctx, eqAll) {
+    if (ctx.preflop && ctx.raises === 0) return limpEV(ctx, eqAll);
     const { s, hero, villains, toCall } = ctx;
     const allIn = toCall >= hero.stack;
     const pending = villains.map((v, i) => i).filter((i) => !villains[i].allIn && villains[i].committedStreet < s.currentBet);
@@ -1336,6 +1447,28 @@
       ev += prob * (R * eq * (s.pot + toCall + extra) - toCall);
     }
     return ev;
+  }
+  function limpEV(ctx, eqAll) {
+    const { s, villains, toCall } = ctx;
+    const pre = preflopComboStrengths();
+    let pNoRaise = 1;
+    const passive = [];
+    villains.forEach((v, i) => {
+      const acted = s.actions.some((a) => a.key === v.key && a.street === "preflop" && a.type !== "post");
+      if (acted || v.allIn) {
+        passive.push(ctx.ranges[i]);
+        return;
+      }
+      const frac = Math.min(0.5, ctx.profiles[i].stat("pfr") * 0.9);
+      const q = rangePercentiles(ctx.ranges[i], pre);
+      const checks = new Range(Float64Array.from(ctx.ranges[i].w, (w, k) => w * (1 - inTop(q[k], frac))));
+      const total = ctx.ranges[i].size();
+      pNoRaise *= total > 0 ? checks.size() / total : 1;
+      passive.push(checks);
+    });
+    const eq = passive.every((r, i) => r === ctx.ranges[i]) ? eqAll : equityVs(ctx, passive, 307);
+    const noRaise = realization(ctx, false, eq) * eq * (s.pot + toCall) - toCall;
+    return pNoRaise * noRaise + (1 - pNoRaise) * -toCall;
   }
   function buildOptions(ctx, eqAll) {
     const { s, hero, toCall } = ctx;
@@ -1417,18 +1550,70 @@
     const R = realization(ctx, false, eqAll) * (ctx.heroInPosition ? 1 : 0.93);
     return R * eqAll * s.pot;
   }
+  var heroEqCache = /* @__PURE__ */ new WeakMap();
+  function heroRangeEquity(ctx, to) {
+    const { s, hero } = ctx;
+    const allIn = to >= hero.committedStreet + hero.stack;
+    const ratio = (to - s.currentBet) / Math.max(1, s.pot + ctx.toCall);
+    const band = allIn ? "allin" : ratio < 0.45 ? "small" : ratio < 0.9 ? "medium" : "large";
+    let cache = heroEqCache.get(ctx);
+    if (!cache) heroEqCache.set(ctx, cache = /* @__PURE__ */ new Map());
+    let eq = cache.get(band);
+    if (!eq) {
+      const rep = band === "allin" ? to : Math.round(s.currentBet + (band === "small" ? 0.33 : band === "medium" ? 0.66 : 1.25) * (s.pot + ctx.toCall));
+      eq = equityVsRange(s.board, perceivedHeroRange(ctx, Math.min(rep, hero.committedStreet + hero.stack)));
+      cache.set(band, eq);
+    }
+    return eq;
+  }
+  function perceivedHeroRange(ctx, to) {
+    const { s, hero } = ctx;
+    const facing = s.currentBet;
+    const raisesBefore = s.actions.filter((a) => a.street === s.street && (a.type === "bet" || a.type === "raise")).length;
+    const action = {
+      key: hero.key,
+      seat: hero.seat,
+      street: s.street,
+      type: facing > 0 ? "raise" : "bet",
+      added: to - hero.committedStreet,
+      toTotal: to,
+      facing,
+      potBefore: s.pot,
+      allIn: to >= hero.committedStreet + hero.stack,
+      raisesBefore,
+      auto: false
+    };
+    const r = estimateRange({
+      key: hero.key,
+      profile: ctx.heroProfile,
+      position: hero.position,
+      headsUp: ctx.headsUp,
+      players: ctx.dealt,
+      actions: [...s.actions, action],
+      board: s.board,
+      dead: []
+    });
+    return r.size() >= 1 ? r : Range.full().removeCards(s.board);
+  }
   function aggressiveEV(ctx, to) {
     const { s, hero, villains } = ctx;
     const added = to - hero.committedStreet;
-    const ratioFor = (v) => {
-      const capTo = Math.min(to, v.committedStreet + v.stack);
+    const ratioAt = (target, v) => {
+      const capTo = Math.min(target, v.committedStreet + v.stack);
       const callAmt = Math.max(0, capTo - v.committedStreet);
       const potBeforeBet = s.pot + (capTo - hero.committedStreet) - callAmt;
       return callAmt / Math.max(1, potBeforeBet);
     };
+    const ratioFor = (v) => ratioAt(to, v);
+    const vsHero = ctx.preflop ? void 0 : heroRangeEquity(ctx, to);
+    const stdTo = ctx.preflop ? Math.min(hero.committedStreet + hero.stack, Math.max(s.currentBet + ctx.bb, sizeTargets(ctx)[0])) : to;
     const resp = villains.map((v, i) => {
       if (v.allIn || v.stack === 0) return { fold: 0, continuing: ctx.ranges[i], raising: new Range(), canAct: false };
-      const r = respondToBet(ctx.ranges[i], s.board, ctx.profiles[i], ratioFor(v), baseContinue(ctx, i));
+      const capTo = Math.min(to, v.committedStreet + v.stack);
+      const callAmt = Math.max(0, capTo - v.committedStreet);
+      const need = callAmt / Math.max(1, s.pot + (capTo - hero.committedStreet) + callAmt);
+      const refRatio = ctx.preflop ? ratioAt(stdTo, v) : void 0;
+      const r = respondToBet(ctx.ranges[i], s.board, ctx.profiles[i], ratioFor(v), baseContinue(ctx, i), { refRatio, vsBettor: vsHero, need });
       return { ...r, canAct: true };
     });
     let ev = 0;

@@ -2,7 +2,7 @@ import type { Card } from "../engine/cards";
 import { COMBOS, NUM_COMBOS, Range } from "../engine/range";
 import { comboStrengths, preflopComboStrengths } from "../engine/strength";
 import type { HandAction, Position, Street } from "../tracker/types";
-import { type Profile, sizeRatio } from "./model";
+import { type Profile, betSpot, sizeRatio } from "./model";
 
 // Estimate a villain's range by replaying their actions this hand. Each action
 // re-weights every combo by how likely this player is to take that action with
@@ -90,10 +90,10 @@ export function sizeNarrowing(ratio: number): number {
 }
 
 /** Continue frequency vs a bet of `ratio` × pot, from a base frequency measured around 2/3 pot. */
-export function sizeAdjustedContinue(base: number, ratio: number): number {
+export function sizeAdjustedContinue(base: number, ratio: number, refRatio = 0.66): number {
   const mdf = (r: number) => 1 / (1 + r);
   // Theory scales defence with 1/(1+ratio); real players react a bit less to size.
-  return Math.min(0.97, Math.max(0.03, base * Math.pow(mdf(ratio) / mdf(0.66), 0.85)));
+  return Math.min(0.97, Math.max(0.03, base * Math.pow(mdf(ratio) / mdf(refRatio), 0.85)));
 }
 
 export interface RangeContext {
@@ -153,8 +153,8 @@ export function estimateRange(ctx: RangeContext): Range {
     const board = boardAt(ctx.board, a.street);
     if (board.length < 3) continue;
     const q = rangePercentiles(range, boardStrengths(board));
-    const isCbetSpot = a.street === "flop" && key === lastPreRaiser;
-    const betFreq = isCbetSpot ? profile.stat("cbet") : profile.stat("betWhenCheckedTo");
+    const spot = betSpot(ctx.actions, a);
+    const betFreq = spot === "cbet" ? profile.stat("cbet") : spot === "lead" ? profile.stat("lead") : profile.stat("betWhenCheckedTo");
     const raiseFreq = profile.stat("raiseVsBet");
 
     if (a.facing === 0 || a.type === "check" || a.type === "bet") {
@@ -163,15 +163,21 @@ export function estimateRange(ctx: RangeContext): Range {
       const b = a.type === "bet" ? profile.bluffFor(ratio) : bluff;
       // Bigger bets come from a narrower, stronger slice of the range (plus bluffs).
       const freq = betFreq * sizeNarrowing(ratio);
-      const pBet = (i: number) => inTop(q[i], freq * (1 - b)) + 0.8 * inBottom(q[i], freq * b);
-      // People check strong hands too (trapping, especially in limped pots), so checks never rule them out.
-      if (a.type === "check") reweight(range, (i) => Math.max(0.25, 1 - pBet(i)));
-      else reweight(range, (i) => Math.max(0.01, pBet(i)));
+      const polar = (i: number) => inTop(q[i], freq * (1 - b)) + 0.8 * inBottom(q[i], freq * b);
+      // Checking to the bettor is what nearly everyone does, so it says little.
+      // When checked to, people bet good hands much more often, but still trap
+      // sometimes (so checks never rule strong hands out). And the rare player
+      // who does bet out into the bettor usually has a strong hand or a bluff.
+      if (a.type === "check")
+        reweight(range, (i) => (spot === "lead" ? 1 - Math.min(1, freq * (0.5 + q[i])) : Math.max(0.25, 1 - polar(i))));
+      else reweight(range, (i) => Math.max(0.01, polar(i)));
     } else {
       const facingBet = a.type === "call" ? a.added : a.facing - (a.toTotal - a.added);
       const ratio = facingBet / Math.max(1, a.potBefore - facingBet);
       const cont = sizeAdjustedContinue(1 - profile.foldToBet(a.street), ratio);
-      if (a.type === "call") reweight(range, (i) => 0.01 + inTop(q[i], cont) * (1 - 0.6 * inTop(q[i], raiseFreq * 0.7)));
+      // Calling keeps everything good enough to continue; only the very top
+      // (sets, two pair) is partly missing because those sometimes raise instead.
+      if (a.type === "call") reweight(range, (i) => 0.01 + inTop(q[i], cont) * (1 - 0.5 * inTop(q[i], raiseFreq * 0.5)));
       else {
         const ratio = sizeRatio(a);
         const b = profile.bluffFor(ratio);
@@ -188,32 +194,52 @@ export function estimateRange(ctx: RangeContext): Range {
  * this player continues against a ~2/3-pot bet in this spot (`baseContinue`).
  * Returns the fold probability and the continuing / raising sub-ranges.
  */
-export function respondToBet(range: Range, board: readonly Card[], profile: Profile, ratio: number, baseContinue: number) {
+export interface RespondOptions {
+  /** Bet size the base frequency was measured at (preflop: the standard size for this spot). */
+  refRatio?: number;
+  /**
+   * Postflop: each combo's equity against the range the bettor is perceived to
+   * have, plus the equity the price demands. When given, calls are decided the
+   * way people decide them: "is my hand good enough against what they show?"
+   */
+  vsBettor?: Float64Array;
+  need?: number;
+}
+
+export function respondToBet(range: Range, board: readonly Card[], profile: Profile, ratio: number, baseContinue: number, opts: RespondOptions = {}) {
   const preflop = board.length < 3;
   const strengths = preflop ? preflopComboStrengths() : boardStrengths(board);
-  const q = rangePercentiles(range, strengths);
-  const cont = sizeAdjustedContinue(baseContinue, ratio);
   const raiseFreq = Math.min(0.5, profile.stat("raiseVsBet"));
-  // Hands strong enough in absolute terms continue regardless of frequencies:
-  // people don't fold top pair to a small bet just because their range is strong.
-  const sticky = (baseContinue - 0.6) * 0.25;
-  const tau = preflop
-    ? Math.min(0.97, 0.8 + 0.05 * Math.log2(1 + ratio) - sticky)
-    : Math.min(0.93, 0.6 + 0.1 * Math.log2(1 + ratio) - sticky);
   const continuing = new Range();
   const raising = new Range();
   let total = 0;
   let kept = 0;
+
+  // Frequency view: this player's real fold-to-bet record (scaled for size),
+  // plus "decent hands don't fold". Always computed.
+  const q = rangePercentiles(range, strengths);
+  const cont = sizeAdjustedContinue(baseContinue, ratio, opts.refRatio);
+  const sticky = (baseContinue - 0.6) * 0.25;
+  const rel = opts.refRatio !== undefined ? Math.max(0, ratio / Math.max(0.05, opts.refRatio) - 1) : ratio;
+  const tau = preflop
+    ? Math.min(0.97, 0.8 + 0.05 * Math.log2(1 + rel) - sticky)
+    : Math.min(0.93, 0.6 + 0.1 * Math.log2(1 + ratio) - sticky);
+  const byFreq = (i: number) => 1 - (1 - inTop(q[i], cont)) * (1 - sigmoid((strengths[i] - tau) / 0.04));
+
+  // Pot-odds view (postflop): "is my hand good enough against what this bet
+  // represents, at this price?" Real people only half play like this; they
+  // also make curiosity calls, so the two views are blended.
+  const rational = !preflop && opts.vsBettor && opts.need !== undefined;
+  const shift = (baseContinue - 0.6) * 0.5;
+  const eqQ = rational ? rangePercentiles(range, opts.vsBettor!) : q;
   for (let i = 0; i < NUM_COMBOS; i++) {
     const w = range.w[i];
     if (w <= 0) continue;
     total += w;
-    const byFreq = inTop(q[i], cont);
-    const byStrength = sigmoid((strengths[i] - tau) / 0.04);
-    const c = 1 - (1 - byFreq) * (1 - byStrength);
+    const c = rational ? 0.5 * byFreq(i) + 0.5 * sigmoid((opts.vsBettor![i] - opts.need! + shift) / 0.06) : byFreq(i);
     continuing.w[i] = w * c;
     kept += w * c;
-    raising.w[i] = w * inTop(q[i], raiseFreq * cont);
+    raising.w[i] = w * Math.min(c, inTop(eqQ[i], raiseFreq * Math.max(cont, 0.3)));
   }
   return { fold: total > 0 ? 1 - kept / total : 1, continuing, raising, continueFreq: total > 0 ? kept / total : 0 };
 }

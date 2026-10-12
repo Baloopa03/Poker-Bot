@@ -23,6 +23,7 @@ export type StatName =
   | "foldToBetRiver"
   | "raiseVsBet"
   | "betWhenCheckedTo"
+  | "lead"
   | "wtsd"
   | "wonAtShowdown"
   | "bluffShare"
@@ -64,6 +65,8 @@ export const PRIORS: Record<StatName, [number, number]> = {
   foldToBetRiver: [0.4, 8],
   raiseVsBet: [0.1, 10],
   betWhenCheckedTo: [0.4, 8],
+  // Betting out into the previous street's aggressor ("donk"/lead): rare.
+  lead: [0.1, 8],
   wtsd: [0.3, 8],
   wonAtShowdown: [0.5, 8],
   bluffShare: [0.3, 6],
@@ -427,14 +430,14 @@ export class OpponentModel {
         if (!s) continue;
         const aggressive = a.type === "bet" || a.type === "raise";
         if (!betSeen) {
-          if (street === "flop" && a.key === lastRaiser) this.bump(s, "cbet", aggressive);
-          else this.bump(s, "betWhenCheckedTo", aggressive);
-          if (aggressive && street === "flop" && a.key === lastRaiser) cbetMade = true;
+          const spot = betSpot(h.actions, a);
+          this.bump(s, spot === "cbet" ? "cbet" : spot === "lead" ? "lead" : "betWhenCheckedTo", aggressive);
+          if (aggressive && spot === "cbet") cbetMade = true;
         } else {
           const fs: StatName = street === "flop" ? "foldToBetFlop" : street === "turn" ? "foldToBetTurn" : "foldToBetRiver";
           this.bump(s, fs, a.type === "fold");
           this.bump(s, "raiseVsBet", a.type === "raise");
-          if (cbetMade && street === "flop" && a.key !== lastRaiser) this.bump(s, "foldToCbet", a.type === "fold");
+          if (cbetMade && street === "flop") this.bump(s, "foldToCbet", a.type === "fold");
         }
         if (aggressive) betSeen = true;
       }
@@ -480,6 +483,27 @@ export class OpponentModel {
       }
     }
   }
+}
+
+/**
+ * What kind of chance to bet a player had with this first action on a street:
+ * continuing as the last aggressor ("cbet" on the flop, "barrel" later),
+ * leading out into the aggressor before they act ("lead"), or having it
+ * checked to them ("checkedTo"). Checking to the aggressor says little about
+ * strength, so these must not be lumped together.
+ */
+export function betSpot(actions: readonly HandAction[], a: HandAction): "cbet" | "barrel" | "lead" | "checkedTo" {
+  const order: Street[] = ["preflop", "flop", "turn", "river"];
+  const idx = order.indexOf(a.street);
+  if (idx <= 0) return "checkedTo";
+  const prev = order[idx - 1];
+  const before = actions.slice(0, actions.indexOf(a));
+  const aggressor = [...before].reverse().find((x) => x.street === prev && (x.type === "bet" || x.type === "raise"))?.key;
+  if (!aggressor) return "checkedTo";
+  if (aggressor === a.key) return a.street === "flop" ? "cbet" : "barrel";
+  const aggressorActed = before.some((x) => x.street === a.street && x.key === aggressor);
+  const aggressorFolded = before.some((x) => x.key === aggressor && x.type === "fold");
+  return aggressorActed || aggressorFolded ? "checkedTo" : "lead";
 }
 
 /** Size of a bet or raise as a fraction of the pot it was made into (what players call "x% pot"). */

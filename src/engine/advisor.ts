@@ -1,11 +1,11 @@
 import { type Card, cardsToString } from "./cards";
 import { equity, riverEquityExact } from "./equity";
 import { COMBOS as COMBO_CARDS, NUM_COMBOS, Range, classOf } from "./range";
-import { preflopComboStrengths, preflopScores } from "./strength";
+import { equityVsRange, preflopComboStrengths, preflopScores } from "./strength";
 import { boardNotes, playingTheBoard, rangeComposition } from "./texture";
 import { OpponentModel, type Profile } from "../opponents/model";
-import { bettingSplit, boardStrengths, estimateRange, rangeWidth, respondToBet } from "../opponents/ranges";
-import type { PlayerState, Position, TableState } from "../tracker/types";
+import { bettingSplit, boardStrengths, estimateRange, inTop, rangePercentiles, rangeWidth, respondToBet } from "../opponents/ranges";
+import type { HandAction, PlayerState, Position, TableState } from "../tracker/types";
 
 // The decision engine. Every legal option is scored by expected chips won
 // relative to folding now, using each villain's estimated range, how often
@@ -94,6 +94,9 @@ interface Ctx {
   /** Raises so far on this street (excluding blinds). */
   raises: number;
   heroWasPreflopAggressor: boolean;
+  /** How opponents see you: your own profile (from the hands you've played). */
+  heroProfile: Profile;
+  dealt: number;
 }
 
 export function advise(s: TableState, learned: OpponentModel, opts: AdvisorOptions = {}): Advice | null {
@@ -138,6 +141,8 @@ export function advise(s: TableState, learned: OpponentModel, opts: AdvisorOptio
     preflop: s.street === "preflop",
     raises: s.actions.filter((a) => a.street === s.street && (a.type === "raise" || a.type === "bet")).length,
     heroWasPreflopAggressor: preflopRaisers.length > 0 && preflopRaisers[preflopRaisers.length - 1].key === hero.key,
+    heroProfile: model.profile(hero.key, hero.name, dealt),
+    dealt,
   };
 
   const eqAll = equityVs(ctx, ranges);
@@ -199,9 +204,13 @@ function equityVs(ctx: Ctx, ranges: Range[], salt = 0): number {
  */
 function realization(ctx: Ctx, allInNow: boolean, eq = 0.5): number {
   if (allInNow || ctx.s.street === "river") return 1;
-  const base = ctx.preflop ? (ctx.heroInPosition ? 0.9 : ctx.hero.position === "SB" ? 0.72 : 0.8) : ctx.heroInPosition ? 0.97 : 0.88;
-  const byStrength = Math.min(1.12, Math.max(0.85, 0.8 + 0.4 * eq));
-  return Math.min(1.1, base * byStrength);
+  // Typical realisation (solver studies): in position ~100–110% of raw equity,
+  // big blind out of position ~60–75%, small blind (worst seat) a bit lower.
+  let base: number;
+  if (ctx.preflop) base = ctx.heroInPosition ? 1.02 : ctx.hero.position === "SB" ? 0.7 : 0.8;
+  else base = ctx.heroInPosition ? 1.0 : 0.85;
+  const byStrength = Math.min(1.12, Math.max(0.8, 0.75 + 0.5 * eq));
+  return Math.min(1.12, base * byStrength);
 }
 
 /** How often this villain continues vs a ~2/3-pot bet / standard raise in the current spot. */
@@ -211,7 +220,17 @@ function baseContinue(ctx: Ctx, i: number): number {
   if (ctx.preflop) {
     if (ctx.raises === 0) {
       // Hero opening or isolating: blinds defend at roughly 1 − fold-to-steal.
-      const defend = v.position === "SB" || v.position === "BB" ? 1 - p.stat("foldToSteal") : p.stat("callOpen") + p.stat("threeBet");
+      // Blinds defend steals unequally when both are still in: the small blind
+      // (out of position, big blind behind) defends about half as often as the big blind.
+      const blindDefend = 1 - p.stat("foldToSteal");
+      const defend =
+        v.position === "BB"
+          ? Math.min(0.9, blindDefend * (ctx.headsUp ? 1 : 1.1))
+          : v.position === "SB" && !ctx.headsUp
+            ? blindDefend * 0.55
+            : v.position === "SB"
+              ? blindDefend
+              : p.stat("callOpen") + p.stat("threeBet");
       return Math.min(0.9, Math.max(0.1, defend));
     }
     if (ctx.raises === 1) return Math.min(0.9, Math.max(0.15, 1 - p.stat("foldTo3Bet")));
@@ -226,6 +245,7 @@ function baseContinue(ctx: Ctx, i: number): number {
  * villains still to act behind us may fold or continue (enumerated).
  */
 function callEV(ctx: Ctx, eqAll: number): number {
+  if (ctx.preflop && ctx.raises === 0) return limpEV(ctx, eqAll);
   const { s, hero, villains, toCall } = ctx;
   const allIn = toCall >= hero.stack;
   const pending = villains.map((v, i) => i).filter((i) => !villains[i].allIn && villains[i].committedStreet < s.currentBet);
@@ -255,6 +275,35 @@ function callEV(ctx: Ctx, eqAll: number): number {
     ev += prob * (R * eq * (s.pot + toCall + extra) - toCall);
   }
   return ev;
+}
+
+/**
+ * Limping (or completing the small blind). Players still to act, including
+ * the big blind who has the option, can raise; we then usually give up the
+ * limp. Otherwise we see a flop against the hands that didn't raise.
+ */
+function limpEV(ctx: Ctx, eqAll: number): number {
+  const { s, villains, toCall } = ctx;
+  const pre = preflopComboStrengths();
+  let pNoRaise = 1;
+  const passive: Range[] = [];
+  villains.forEach((v, i) => {
+    const acted = s.actions.some((a) => a.key === v.key && a.street === "preflop" && a.type !== "post");
+    if (acted || v.allIn) {
+      passive.push(ctx.ranges[i]);
+      return;
+    }
+    // Raise-over-a-limp frequency: roughly their preflop raise rate.
+    const frac = Math.min(0.5, ctx.profiles[i].stat("pfr") * 0.9);
+    const q = rangePercentiles(ctx.ranges[i], pre);
+    const checks = new Range(Float64Array.from(ctx.ranges[i].w, (w, k) => w * (1 - inTop(q[k], frac))));
+    const total = ctx.ranges[i].size();
+    pNoRaise *= total > 0 ? checks.size() / total : 1;
+    passive.push(checks);
+  });
+  const eq = passive.every((r, i) => r === ctx.ranges[i]) ? eqAll : equityVs(ctx, passive, 307);
+  const noRaise = realization(ctx, false, eq) * eq * (s.pot + toCall) - toCall;
+  return pNoRaise * noRaise + (1 - pNoRaise) * -toCall;
 }
 
 function buildOptions(ctx: Ctx, eqAll: number): AdviceOption[] {
@@ -366,20 +415,83 @@ interface AggResult {
   eqCalled: number;
 }
 
+/**
+ * Opponents' equity against the range they put you on after this bet. They
+ * read a bet as small, medium or large rather than to the chip, so one
+ * calculation per size band is enough (cached per decision).
+ */
+const heroEqCache = new WeakMap<Ctx, Map<string, Float64Array>>();
+function heroRangeEquity(ctx: Ctx, to: number): Float64Array {
+  const { s, hero } = ctx;
+  const allIn = to >= hero.committedStreet + hero.stack;
+  const ratio = (to - s.currentBet) / Math.max(1, s.pot + ctx.toCall);
+  const band = allIn ? "allin" : ratio < 0.45 ? "small" : ratio < 0.9 ? "medium" : "large";
+  let cache = heroEqCache.get(ctx);
+  if (!cache) heroEqCache.set(ctx, (cache = new Map()));
+  let eq = cache.get(band);
+  if (!eq) {
+    const rep = band === "allin" ? to : Math.round(s.currentBet + (band === "small" ? 0.33 : band === "medium" ? 0.66 : 1.25) * (s.pot + ctx.toCall));
+    eq = equityVsRange(s.board, perceivedHeroRange(ctx, Math.min(rep, hero.committedStreet + hero.stack)));
+    cache.set(band, eq);
+  }
+  return eq;
+}
+
+/** The range opponents put you on after you bet/raise to `to` (they can't see your cards). */
+function perceivedHeroRange(ctx: Ctx, to: number): Range {
+  const { s, hero } = ctx;
+  const facing = s.currentBet;
+  const raisesBefore = s.actions.filter((a) => a.street === s.street && (a.type === "bet" || a.type === "raise")).length;
+  const action: HandAction = {
+    key: hero.key,
+    seat: hero.seat,
+    street: s.street as HandAction["street"],
+    type: facing > 0 ? "raise" : "bet",
+    added: to - hero.committedStreet,
+    toTotal: to,
+    facing,
+    potBefore: s.pot,
+    allIn: to >= hero.committedStreet + hero.stack,
+    raisesBefore,
+    auto: false,
+  };
+  const r = estimateRange({
+    key: hero.key,
+    profile: ctx.heroProfile,
+    position: hero.position,
+    headsUp: ctx.headsUp,
+    players: ctx.dealt,
+    actions: [...s.actions, action],
+    board: s.board,
+    dead: [],
+  });
+  return r.size() >= 1 ? r : Range.full().removeCards(s.board);
+}
+
 function aggressiveEV(ctx: Ctx, to: number): AggResult {
   const { s, hero, villains } = ctx;
   const added = to - hero.committedStreet;
   // Size of the bet a villain faces relative to the pot before it (what they see as "x% pot").
-  const ratioFor = (v: PlayerState) => {
-    const capTo = Math.min(to, v.committedStreet + v.stack);
+  const ratioAt = (target: number, v: PlayerState) => {
+    const capTo = Math.min(target, v.committedStreet + v.stack);
     const callAmt = Math.max(0, capTo - v.committedStreet);
     const potBeforeBet = s.pot + (capTo - hero.committedStreet) - callAmt;
     return callAmt / Math.max(1, potBeforeBet);
   };
+  const ratioFor = (v: PlayerState) => ratioAt(to, v);
 
+  // Postflop, opponents decide by asking "is my hand good enough against what
+  // this bet says they have, at this price?" Preflop, their stats are measured
+  // against standard sizes, so a size is judged relative to the standard one.
+  const vsHero = ctx.preflop ? undefined : heroRangeEquity(ctx, to);
+  const stdTo = ctx.preflop ? Math.min(hero.committedStreet + hero.stack, Math.max(s.currentBet + ctx.bb, sizeTargets(ctx)[0])) : to;
   const resp = villains.map((v, i) => {
     if (v.allIn || v.stack === 0) return { fold: 0, continuing: ctx.ranges[i], raising: new Range(), canAct: false };
-    const r = respondToBet(ctx.ranges[i], s.board, ctx.profiles[i], ratioFor(v), baseContinue(ctx, i));
+    const capTo = Math.min(to, v.committedStreet + v.stack);
+    const callAmt = Math.max(0, capTo - v.committedStreet);
+    const need = callAmt / Math.max(1, s.pot + (capTo - hero.committedStreet) + callAmt);
+    const refRatio = ctx.preflop ? ratioAt(stdTo, v) : undefined;
+    const r = respondToBet(ctx.ranges[i], s.board, ctx.profiles[i], ratioFor(v), baseContinue(ctx, i), { refRatio, vsBettor: vsHero, need });
     return { ...r, canAct: true };
   });
 

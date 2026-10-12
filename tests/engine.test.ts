@@ -88,3 +88,33 @@ suite("equity", () => {
     expect(nuts.equity).toBe(1);
   });
 });
+
+suite("equity vs a range", () => {
+  it("matches the exact river calculation for a specific hand", async () => {
+    const { equityVsRange } = await import("../src/engine/strength");
+    const { comboIndex } = await import("../src/engine/range");
+    const board = parseCards("Kh 2c 4s 5s Jd");
+    const range = parseRange("KQ, KT, 55, 77, A3s, QJs, T9s"); // contains no 7c/7d/Kc
+    const fast = equityVsRange(board, range);
+    for (const h of ["Kc 3c", "7c 7d", "Qc 9c"]) {
+      const [a, b] = parseCards(h);
+      const exact = riverEquityExact([a, b], board, range.clone().removeCards([a, b])).equity;
+      expect(fast[comboIndex(a, b)]).toBeCloseTo(exact, 6); // exact, including blockers
+    }
+  });
+
+  it("calling model: callers need more equity as the price rises", async () => {
+    const { respondToBet } = await import("../src/opponents/ranges");
+    const { OpponentModel } = await import("../src/opponents/model");
+    const { equityVsRange } = await import("../src/engine/strength");
+    const board = parseCards("Kh 2c 4s 5s Jd");
+    const villain = Range.full().removeCards(board);
+    const bettor = parseRange("KQ, KJ, AK, 55, 44, A3s, 76s");
+    const vs = equityVsRange(board, bettor);
+    const p = new OpponentModel().profile("v");
+    const small = respondToBet(villain, board, p, 0.33, 0.6, { vsBettor: vs, need: 0.2 });
+    const shove = respondToBet(villain, board, p, 3, 0.6, { vsBettor: vs, need: 0.43 });
+    expect(shove.fold).toBeGreaterThan(small.fold);
+    expect(shove.continuing.size()).toBeLessThan(small.continuing.size());
+  });
+});
