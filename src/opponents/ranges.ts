@@ -208,6 +208,12 @@ export interface RespondOptions {
    */
   vsBettor?: Float64Array;
   need?: number;
+  /**
+   * Share of this player's chips already in the pot. Someone with half their
+   * stack in rarely folds a hand that the price justifies, whatever their
+   * usual fold-to-raise habit (that habit is measured on small, early bets).
+   */
+  committed?: number;
 }
 
 export function respondToBet(range: Range, board: readonly Card[], profile: Profile, ratio: number, baseContinue: number, opts: RespondOptions = {}) {
@@ -233,14 +239,18 @@ export function respondToBet(range: Range, board: readonly Card[], profile: Prof
   // Pot-odds view (postflop): "is my hand good enough against what this bet
   // represents, at this price?" Real people only half play like this; they
   // also make curiosity calls, so the two views are blended.
-  const rational = !preflop && opts.vsBettor && opts.need !== undefined;
+  const hasPrice = opts.vsBettor !== undefined && opts.need !== undefined;
+  const rational = !preflop && hasPrice;
   const shift = (baseContinue - 0.6) * 0.5;
   const eqQ = rational ? rangePercentiles(range, opts.vsBettor!) : q;
+  // Pot-committed: the price takes over from habit as more of the stack is in.
+  const commit = hasPrice ? Math.min(1, Math.max(0, ((opts.committed ?? 0) - 0.2) / 0.3)) : 0;
   for (let i = 0; i < NUM_COMBOS; i++) {
     const w = range.w[i];
     if (w <= 0) continue;
     total += w;
-    const c = rational ? 0.5 * byFreq(i) + 0.5 * sigmoid((opts.vsBettor![i] - opts.need! + shift) / 0.06) : byFreq(i);
+    let c = rational ? 0.5 * byFreq(i) + 0.5 * sigmoid((opts.vsBettor![i] - opts.need! + shift) / 0.06) : byFreq(i);
+    if (commit > 0) c += commit * Math.max(0, sigmoid((opts.vsBettor![i] - opts.need!) / 0.04) - c);
     continuing.w[i] = w * c;
     kept += w * c;
     raising.w[i] = w * Math.min(c, inTop(eqQ[i], raiseFreq * Math.max(cont, 0.3)));

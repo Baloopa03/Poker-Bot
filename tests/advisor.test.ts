@@ -406,4 +406,27 @@ describe("careful mode and tidy amounts", () => {
     const a = advise(unopenedButton("As Ah"), model, { seed: 1 })!;
     for (const o of a.options) if (o.toTotal !== undefined && !o.allIn) expect((o.toTotal - 15) % 5).toBe(0);
   });
+
+  it("doesn't bluff-shove into someone who already has most of their stack in", () => {
+    // Real hand: BTN opened to 299 of 517. Re-shoving 63o only works if they
+    // fold, and with 58% of their chips in they almost never will.
+    const s = table({
+      hero: "6d 3h",
+      players: [player("me", "s3", "BB", 704, 15), player("ike", "s1", "BTN", 218, 299), { ...player("sam", "s2", "SB", 256, 8), folded: true, inHand: false }],
+      actions: [...blinds().map((a, i) => ({ ...a, key: i ? "me" : "sam", seat: i ? "s3" : "s2" })), { key: "ike", seat: "s1", street: "preflop", type: "raise", added: 299, toTotal: 299, facing: 15, potBefore: 23, raisesBefore: 0 }],
+    });
+    const a = advise(s, model, { seed: 5 })!;
+    expect(a.best.action).toBe("fold");
+    const jam = a.options.find((o) => o.allIn)!;
+    expect(jam.foldProb!).toBeLessThan(0.1);
+  });
+
+  it("still re-shoves a strong hand over a big open", () => {
+    const s = table({
+      hero: "Qs Qd",
+      players: [player("me", "s3", "BB", 704, 15), player("ike", "s1", "BTN", 218, 299), { ...player("sam", "s2", "SB", 256, 8), folded: true, inHand: false }],
+      actions: [...blinds().map((a, i) => ({ ...a, key: i ? "me" : "sam", seat: i ? "s3" : "s2" })), { key: "ike", seat: "s1", street: "preflop", type: "raise", added: 299, toTotal: 299, facing: 15, potBefore: 23, raisesBefore: 0 }],
+    });
+    expect(advise(s, model, { seed: 5 })!.best.allIn).toBe(true);
+  });
 });

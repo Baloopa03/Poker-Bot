@@ -1,7 +1,7 @@
 import { type Card, cardsToString } from "./cards";
 import { equity, riverEquityExact } from "./equity";
 import { COMBOS as COMBO_CARDS, NUM_COMBOS, Range, classOf } from "./range";
-import { equityVsRange, preflopComboStrengths, preflopScores } from "./strength";
+import { equityVsRange, preflopComboStrengths, preflopEquityVsTop, preflopScores } from "./strength";
 import { boardNotes, playingTheBoard, rangeComposition } from "./texture";
 import { OpponentModel, type Profile } from "../opponents/model";
 import { bettingSplit, boardStrengths, estimateRange, inTop, rangePercentiles, rangeWidth, respondToBet } from "../opponents/ranges";
@@ -518,7 +518,7 @@ function aggressiveEV(ctx: Ctx, to: number): AggResult {
   // Postflop, opponents decide by asking "is my hand good enough against what
   // this bet says they have, at this price?" Preflop, their stats are measured
   // against standard sizes, so a size is judged relative to the standard one.
-  const vsHero = ctx.preflop ? undefined : heroRangeEquity(ctx, to);
+  const vsHero = ctx.preflop ? preflopEquityVsTop(perceivedHeroRange(ctx, to).fraction()) : heroRangeEquity(ctx, to);
   const stdTo = ctx.preflop ? Math.min(hero.committedStreet + hero.stack, Math.max(s.currentBet + ctx.bb, sizeTargets(ctx)[0])) : to;
   const resp = villains.map((v, i) => {
     if (v.allIn || v.stack === 0) return { fold: 0, continuing: ctx.ranges[i], raising: new Range(), canAct: false };
@@ -526,7 +526,8 @@ function aggressiveEV(ctx: Ctx, to: number): AggResult {
     const callAmt = Math.max(0, capTo - v.committedStreet);
     const need = callAmt / Math.max(1, s.pot + (capTo - hero.committedStreet) + callAmt);
     const refRatio = ctx.preflop ? ratioAt(stdTo, v) : undefined;
-    const r = respondToBet(ctx.ranges[i], s.board, ctx.profiles[i], ratioFor(v), baseContinue(ctx, i), { refRatio, vsBettor: vsHero, need });
+    const committed = v.committedHand / Math.max(1, v.committedHand + v.stack);
+    const r = respondToBet(ctx.ranges[i], s.board, ctx.profiles[i], ratioFor(v), baseContinue(ctx, i), { refRatio, vsBettor: vsHero, need, committed });
     return { ...r, canAct: true };
   });
 

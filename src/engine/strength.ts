@@ -2,6 +2,7 @@ import type { Card } from "./cards";
 import { evaluate } from "./evaluator";
 import { rng } from "./equity";
 import preflopEquity from "./preflop-equity.json";
+import preflopVsTop from "./preflop-vs-top.json";
 import { ALL_CLASSES, CLASS_INDEX, CLASS_OF_COMBO, COMBOS, NUM_COMBOS } from "./range";
 
 /**
@@ -114,6 +115,33 @@ const RANK_ORDER = "23456789TJQKA";
 export function preflopComboStrengths(): Float64Array {
   const s = preflopScores();
   return Float64Array.from(CLASS_OF_COMBO, (c) => s.get(c)!);
+}
+
+const VS_TOP = preflopVsTop as { widths: number[]; equity: Record<string, number[]> };
+const vsTopCache = new Map<number, Float64Array>();
+/**
+ * Preflop: every combo's all-in equity against a range that is roughly the
+ * top `width` of hands (a raiser's range), interpolated from a precomputed
+ * table. What a player weighs against the price when facing a big re-raise.
+ */
+export function preflopEquityVsTop(width: number): Float64Array {
+  const ws = VS_TOP.widths;
+  const w = Math.min(ws[ws.length - 1], Math.max(ws[0], width));
+  const key = Math.round(w * 200);
+  let out = vsTopCache.get(key);
+  if (out) return out;
+  let j = 0;
+  while (j < ws.length - 2 && ws[j + 1] < w) j++;
+  const f = (w - ws[j]) / (ws[j + 1] - ws[j]);
+  const byClass = new Map<string, number>();
+  for (const cls of ALL_CLASSES) {
+    const e = VS_TOP.equity[cls];
+    byClass.set(cls, e[j] + f * (e[j + 1] - e[j]));
+  }
+  out = Float64Array.from(CLASS_OF_COMBO, (c) => byClass.get(c)!);
+  if (vsTopCache.size > 64) vsTopCache.clear();
+  vsTopCache.set(key, out);
+  return out;
 }
 
 /** Hand classes making up the top `fraction` of all combos. */

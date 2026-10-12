@@ -253,6 +253,14 @@ Preflop, fold-to-steal / fold-to-3-bet are measured at standard sizes, so a
 size is judged relative to the standard size for that spot. In 3-handed pots
 the small blind defends steals about half as often as the big blind.
 
+**Pot-committed players:** habits are measured on small, early bets. Once a
+player has more than ~20% of their chips in the pot, the price takes over
+progressively (fully at 50%): any hand whose equity against your perceived
+range beats the price keeps going. Preflop that equity comes from a
+precomputed table of each hand vs the top W% of hands
+(`scripts/gen-preflop-vs.ts`). This stops "re-shove trash, they'll fold"
+against someone who opened for half their stack.
+
 ### 5.5 Preflop
 No fixed charts: the same EV machinery decides open/limp/call/3-bet/shove.
 Checked against researched ranges (`scripts/diag-preflop.ts`): 3-handed button
