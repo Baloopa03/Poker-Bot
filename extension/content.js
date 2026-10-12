@@ -2264,6 +2264,8 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
       handShown: []
     };
     lastHistory;
+    /** We started watching part-way through a hand: ignore it for stats and the ledger. */
+    joinedMidHand = false;
     on(event, fn) {
       this.listeners[event].push(fn);
     }
@@ -2608,6 +2610,7 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
     /** Authoritative list of seated players (from lobby stats or a game-state snapshot). */
     syncPlayers(list) {
       const s = this.state;
+      if (!s.handActive && list.some((ps) => (ps?.totalBetsMade ?? 0) > 0)) this.joinedMidHand = true;
       const seen = /* @__PURE__ */ new Set();
       for (const ps of list) {
         if (!ps?.posType || typeof ps.name !== "string") continue;
@@ -2646,7 +2649,7 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
           p.committedHand = 0;
           p.committedStreet = 0;
           p.startStack = p.stack;
-          this.reconcile(p);
+          if (!this.joinedMidHand) this.reconcile(p);
         }
       }
       for (const p of [...s.players]) if (!seen.has(p.seat)) s.players.splice(s.players.indexOf(p), 1);
@@ -2658,6 +2661,7 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
     stageBegan(stageType) {
       const s = this.state;
       if (stageType === "set_blinds") return this.startHand();
+      if (!s.handActive) this.joinedMidHand = true;
       const street = STREET_OF_STAGE[stageType];
       if (!street) return;
       if (street !== "preflop" && street !== "showdown") {
@@ -2670,6 +2674,10 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
     }
     startHand() {
       const s = this.state;
+      if (this.joinedMidHand) {
+        this.joinedMidHand = false;
+        for (const p of s.players) this.reconcile(p);
+      }
       s.handNumber++;
       s.handActive = true;
       s.street = "preflop";
@@ -2799,6 +2807,13 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
     }
     handEnded(a) {
       const s = this.state;
+      if (!s.handActive) {
+        this.joinedMidHand = true;
+        s.street = "idle";
+        s.toActSeat = void 0;
+        this.emit("update", s);
+        return;
+      }
       const res = a?.endPopupData?.gameResults;
       const result = { won: {}, refunded: {}, pot: 0, shown: {}, descriptions: this.descriptions };
       for (const [uid, info] of Object.entries(res?.winnersInfo ?? {})) {

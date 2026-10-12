@@ -169,3 +169,19 @@ describe("tracker: real show-hand capture", () => {
     expect(cardsToString(t.state.heroCards)).toBe("Th Tc"); // next hand dealt normally
   });
 });
+
+describe("tracker: page opened mid-hand (36-minute session)", () => {
+  const { t, hands } = run("3-handed-session-join-mid-hand.json");
+
+  it("skips the partial first hand and matches every server pot after it", () => {
+    expect(hands).toHaveLength(66);
+    for (const h of hands) expect(h.result!.pot).toBe(h.result!.serverPot);
+  });
+
+  it("does not mistake the half-played hand's bets for cash-outs", () => {
+    const l = Object.fromEntries(t.ledger().map((r) => [r.name, r]));
+    expect(l.Jack).toMatchObject({ buyIns: 470, cashOuts: 500, stack: 498, net: 528 });
+    expect(l.Ike).toMatchObject({ buyIns: 440, cashOuts: 500, stack: 0, net: 60 });
+    expect(l.Jun).toMatchObject({ buyIns: 1590, cashOuts: 0, stack: 1002, net: -588 });
+  });
+});

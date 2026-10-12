@@ -78,6 +78,8 @@ export class Tracker {
     handShown: [],
   };
   private lastHistory: HandHistory | undefined;
+  /** We started watching part-way through a hand: ignore it for stats and the ledger. */
+  private joinedMidHand = false;
 
   on<K extends keyof TrackerEvents>(event: K, fn: TrackerEvents[K]): void {
     this.listeners[event].push(fn);
@@ -472,6 +474,9 @@ export class Tracker {
   /** Authoritative list of seated players (from lobby stats or a game-state snapshot). */
   private syncPlayers(list: Any[]): void {
     const s = this.state;
+    // Chips already in a pot we didn't see start mean this isn't a clean
+    // between-hands snapshot (e.g. the page was opened mid-hand).
+    if (!s.handActive && list.some((ps) => (ps?.totalBetsMade ?? 0) > 0)) this.joinedMidHand = true;
     const seen = new Set<string>();
     for (const ps of list) {
       if (!ps?.posType || typeof ps.name !== "string") continue;
@@ -513,7 +518,7 @@ export class Tracker {
         p.committedHand = 0;
         p.committedStreet = 0;
         p.startStack = p.stack;
-        this.reconcile(p);
+        if (!this.joinedMidHand) this.reconcile(p);
       }
     }
     for (const p of [...s.players]) if (!seen.has(p.seat)) s.players.splice(s.players.indexOf(p), 1);
@@ -527,6 +532,7 @@ export class Tracker {
   private stageBegan(stageType: string): void {
     const s = this.state;
     if (stageType === "set_blinds") return this.startHand();
+    if (!s.handActive) this.joinedMidHand = true;
     const street = STREET_OF_STAGE[stageType];
     if (!street) return;
     if (street !== "preflop" && street !== "showdown") {
@@ -540,6 +546,11 @@ export class Tracker {
 
   private startHand(): void {
     const s = this.state;
+    if (this.joinedMidHand) {
+      // First full hand after joining part-way: this is the clean baseline.
+      this.joinedMidHand = false;
+      for (const p of s.players) this.reconcile(p);
+    }
     s.handNumber++;
     s.handActive = true;
     s.street = "preflop";
@@ -677,6 +688,15 @@ export class Tracker {
 
   private handEnded(a: Any): void {
     const s = this.state;
+    if (!s.handActive) {
+      // End of a hand we only saw part of: no history, no stack changes; the
+      // next hand's snapshot brings stacks up to date.
+      this.joinedMidHand = true;
+      s.street = "idle";
+      s.toActSeat = undefined;
+      this.emit("update", s);
+      return;
+    }
     const res = a?.endPopupData?.gameResults;
     const result: HandResult = { won: {}, refunded: {}, pot: 0, shown: {}, descriptions: this.descriptions };
     for (const [uid, info] of Object.entries<Any>(res?.winnersInfo ?? {})) {
