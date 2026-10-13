@@ -1456,8 +1456,10 @@
     const { s, hero, villains, toCall } = ctx;
     const allIn = toCall >= hero.stack;
     const pending = villains.map((v, i) => i).filter((i) => !villains[i].allIn && villains[i].committedStreet < s.currentBet);
+    const behind = hero.stack - toCall;
+    const noMoreBetting = (pot) => allIn || behind <= 0.1 * pot;
     if (!pending.length) {
-      const R = realization(ctx, allIn || villains.every((v) => v.allIn), eqAll);
+      const R = realization(ctx, noMoreBetting(s.pot + toCall) || villains.every((v) => v.allIn), eqAll);
       return R * eqAll * (s.pot + toCall) - toCall;
     }
     const heroTo = hero.committedStreet + toCall;
@@ -1478,7 +1480,12 @@
       const live = ranges.filter((r) => r !== null);
       const extra = resp.reduce((sum, r, k) => sum + (mask & 1 << k ? Math.min(r.callAmt, Math.max(0, heroTo - villains[r.i].committedStreet)) : 0), 0);
       const eq = live.length === villains.length ? eqAll : equityVs(ctx, live, 101 + mask);
-      const R = realization(ctx, allIn, eq);
+      const othersAllIn = villains.every((v, i) => {
+        if (ranges[i] === null) return true;
+        const k = resp.findIndex((r) => r.i === i);
+        return k < 0 ? v.allIn : v.committedStreet + v.stack <= heroTo;
+      });
+      const R = realization(ctx, noMoreBetting(s.pot + toCall + extra) || othersAllIn, eq);
       ev += prob * (R * eq * (s.pot + toCall + extra) - toCall);
     }
     return ev;
@@ -1661,7 +1668,7 @@
       return { ...r, canAct: true };
     });
     let ev = 0;
-    let allFold = 1;
+    let allFold = 0;
     let eqCalledSum = 0;
     let eqCalledW = 0;
     for (const { mask, prob } of continueScenarios(resp.map((r) => 1 - r.fold))) {
@@ -1676,7 +1683,7 @@
       const heroAdded = heroTo - hero.committedStreet;
       const callerAdds = callers.reduce((sum, i) => sum + Math.max(0, Math.min(heroTo, villains[i].committedStreet + villains[i].stack) - villains[i].committedStreet), 0);
       const finalPot = s.pot + heroAdded + callerAdds;
-      const heroAllIn = heroAdded >= hero.stack;
+      const heroAllIn = heroAdded >= hero.stack || hero.stack - heroAdded <= 0.1 * finalPot;
       const everyoneAllIn = heroAllIn || callers.every((i) => villains[i].committedStreet + villains[i].stack <= heroTo);
       const multiway = 1 - 0.04 * (callers.length - 1);
       const R = (eq) => realization(ctx, everyoneAllIn, eq) * multiway;

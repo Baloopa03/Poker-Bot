@@ -429,4 +429,21 @@ describe("careful mode and tidy amounts", () => {
     });
     expect(advise(s, model, { seed: 5 })!.best.allIn).toBe(true);
   });
+
+  it("treats a call that leaves a few chips behind like an all-in", () => {
+    // Real hand: shove for 450 in front of us, we have 455 in the small blind
+    // and the big blind still to act. Calling 442 and shoving 455 are the same
+    // bet, so their values must be close (no "later streets" discount on the call).
+    const s = table({
+      hero: "Kc Jc",
+      players: [player("me", "s2", "SB", 447, 8), player("ike", "s1", "BTN", 0, 450), player("jules", "s3", "BB", 580, 15)],
+      actions: [...blinds().map((a, i) => ({ ...a, key: i ? "jules" : "me", seat: i ? "s3" : "s2" })), { key: "ike", seat: "s1", street: "preflop", type: "raise", added: 450, toTotal: 450, facing: 15, potBefore: 23, raisesBefore: 0, allIn: true }],
+    });
+    s.players[1].allIn = true;
+    const a = advise(s, model, { seed: 6 })!;
+    const call = a.options.find((o) => o.action === "call")!;
+    const jam = a.options.find((o) => o.allIn && o.action === "raise")!;
+    expect(Math.abs(call.ev - jam.ev)).toBeLessThan(60);
+    expect(jam.foldProb!).toBe(0);
+  });
 });
