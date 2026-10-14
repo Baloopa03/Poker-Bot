@@ -1887,6 +1887,7 @@ details.more summary { cursor: pointer; color: #8ab4f8; font-size: 12px; margin-
 .x { background: none; border: 0; color: #9aa0a6; cursor: pointer; font-size: 13px; line-height: 1; }
 .x:hover { color: #f28b82; }
 .loose { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 4px 6px; margin: 3px 0; background: #24272e; border-radius: 6px; cursor: grab; }
+.loose > span:first-child { flex: 1; min-width: 0; }
 select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-radius: 4px; font: inherit; font-size: 11px; max-width: 90px; }
 `;
   var SUIT_CLASS = ["c", "d", "h", "s"];
@@ -2241,7 +2242,8 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
       if (!loose.length) html += `<div class="muted">Every opponent name is assigned.</div>`;
       for (const p of loose)
         html += `<div class="loose" draggable="true" data-drag="${esc(p.key)}"><span>\u283F ${esc(p.name)} <span class="muted">${p.hands} hands</span></span>
-        <select data-act="assign" data-key="${esc(p.key)}" data-name="${esc(p.name)}"><option value="">Add to\u2026</option>${options}<option value="__new">New person\u2026</option></select></div>`;
+        <select data-act="assign" data-key="${esc(p.key)}" data-name="${esc(p.name)}"><option value="">Add to\u2026</option>${options}<option value="__new">New person\u2026</option></select>
+        <button class="icon" title="Forget this name" data-act="forget" data-key="${esc(p.key)}" data-label="${esc(p.name)}">\u{1F5D1}</button></div>`;
       html += `<div class="muted">A name you've assigned is recognised automatically on future nights. Removing a name stops future games counting towards that person; stats already combined stay.</div>`;
       this.pane("people").innerHTML = html;
     }

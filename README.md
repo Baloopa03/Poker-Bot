@@ -33,7 +33,8 @@ mates is kept.
   in-game name you've played against is listed under *Names not assigned yet*.
   Drag a name onto a person, or use its **Add to…** menu, and all its history
   joins that person. From then on, any guest using one of those names counts as
-  that person on future nights. **×** removes a name, ✎ renames, 🗑 forgets.
+  that person on future nights. **×** removes a name, ✎ renames, 🗑 forgets
+  (on a person, or on an unwanted name in the unassigned list).
   You are never listed.
 - **Shown hands:** when a mate chooses to show after a hand (after folding, or
   after winning without a showdown), the bot uses it to check how often they bluff.

@@ -80,8 +80,14 @@ if (process.env.PEOPLE) {
     await page.click('[data-act="add-person"]');
     await page.waitForTimeout(100);
   }
-  const isaiah = await page.getAttribute('.person:has-text("Isaiah")', "data-drop");
-  await page.selectOption('.loose:has-text("Test2") select', isaiah);
+  await page.screenshot({ path: join(shotDir, "e2e-people-loose.png") });
+  if (process.env.FORGET) {
+    page.once("dialog", (d) => d.accept());
+    await page.click('.loose:has-text("Test2") [data-act="forget"]');
+  } else {
+    const isaiah = await page.getAttribute('.person:has-text("Isaiah")', "data-drop");
+    await page.selectOption('.loose:has-text("Test2") select', isaiah);
+  }
   await page.waitForTimeout(150);
   await page.dragAndDrop('.loose:has-text("Test")', '.person:has-text("Justin")');
   await page.waitForTimeout(150);
