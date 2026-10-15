@@ -389,6 +389,12 @@ function buildOptions(ctx: Ctx, eqAll: number): AdviceOption[] {
     // off later by worse hands, which the one-street model doesn't see.
     const streetsLeft = s.street === "flop" ? 2 : s.street === "turn" ? 1 : 0;
     o.ev -= 0.015 * Math.max(0, risk) + 0.04 * overPot + 0.03 * streetsLeft * Math.max(0, overPot - (s.pot + toCall));
+    // An overbet bluff lives entirely on the fold estimate, and nobody's fold
+    // rate at 2-3× pot is really known (habits are seen at normal sizes), so
+    // the part beyond the pot must clear a further margin. Value bets, which
+    // win when called, are barely affected. (Postflop only: preflop raises
+    // are always bigger than the pot.)
+    if (!ctx.preflop) o.ev -= 0.05 * overPot * (1 - Math.min(1, o.eqCalled * 2));
     const action: AdviceAction = s.currentBet > 0 ? "raise" : "bet";
     const isAllIn = to >= maxTo;
     const sizeNote = ctx.preflop ? `${fmt(to / ctx.bb)} BB` : `${Math.round(((to - s.currentBet) / Math.max(1, s.pot + toCall)) * 100)}% pot`;
