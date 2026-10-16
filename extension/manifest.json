@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "description": "Reads your pokerpatio table and suggests plays. Never clicks or acts for you.",
   "permissions": [
-    "storage"
+    "storage",
+    "unlimitedStorage"
   ],
   "icons": {
     "16": "icons/icon16.png",

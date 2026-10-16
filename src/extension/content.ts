@@ -10,12 +10,14 @@ const MODEL_KEY = "pb:model";
 const SETTINGS_KEY = "pb:settings";
 const LEDGER_PREFIX = "pb:ledger:";
 const LEDGER_MAX_AGE_MS = 16 * 3600 * 1000;
-const CAPTURE_LIMIT = 20000;
+const CAPTURE_KEY = "pb:capture";
+const CAPTURE_LIMIT = 30000;
 
 const tracker = new Tracker();
 let model = new OpponentModel();
-const capture: Packet[] = [];
-const started = Date.now();
+let capture: Packet[] = [];
+/** Start of the capture timeline (kept across page reloads in the same room). */
+let started = Date.now();
 let ledgerRestored = false;
 let useReads = true;
 let careful = false;
@@ -128,6 +130,36 @@ function saveLedger(): void {
   if (!tracker.roomId) return;
   storage?.set({ [LEDGER_PREFIX + tracker.roomId]: { savedAt: Date.now(), rows: tracker.exportLedger() } });
 }
+// The capture survives page reloads (pokerpatio sometimes forces one, e.g. for
+// a site update), so "Save capture" still covers the whole night.
+let captureRestored = false;
+let captureTimer: ReturnType<typeof setTimeout> | undefined;
+function storeCapture(): void {
+  if (!tracker.roomId || !captureRestored) return;
+  storage?.set({ [CAPTURE_KEY]: { roomId: tracker.roomId, started, savedAt: Date.now(), entries: capture } });
+}
+function queueStoreCapture(): void {
+  if (captureTimer) return;
+  captureTimer = setTimeout(() => {
+    captureTimer = undefined;
+    storeCapture();
+  }, 30_000);
+}
+async function restoreCapture(): Promise<void> {
+  if (captureRestored || !tracker.roomId || !storage) return;
+  const v = await storage.get(CAPTURE_KEY);
+  const saved = v[CAPTURE_KEY] as { roomId: string; started: number; savedAt: number; entries: Packet[] } | undefined;
+  if (saved?.roomId === tracker.roomId && Date.now() - saved.savedAt < LEDGER_MAX_AGE_MS && Array.isArray(saved.entries)) {
+    const shift = started - saved.started;
+    const now = capture.map((p) => ({ ...p, t: (p.t ?? 0) + shift }));
+    capture = [...saved.entries, { dir: "meta", event: "page-reload", t: shift } as Packet, ...now].slice(-CAPTURE_LIMIT);
+    started = saved.started;
+  }
+  captureRestored = true;
+  storeCapture();
+}
+window.addEventListener("pagehide", storeCapture);
+
 async function restoreLedger(): Promise<void> {
   if (ledgerRestored || !tracker.roomId || !storage) return;
   ledgerRestored = true;
@@ -186,9 +218,14 @@ tracker.on("update", () => render());
 window.addEventListener("message", (e) => {
   if (e.source !== window || e.data?.source !== "pokerbot-page") return;
   const packet = e.data.packet as Packet;
-  if (capture.length < CAPTURE_LIMIT) capture.push({ ...packet, t: Date.now() - started });
+  capture.push({ ...packet, t: Date.now() - started });
+  if (capture.length > CAPTURE_LIMIT) capture.splice(0, capture.length - CAPTURE_LIMIT);
+  queueStoreCapture();
   const hadRoom = tracker.roomId;
   tracker.handle(packet);
-  if (!hadRoom && tracker.roomId) void restoreLedger().then(render);
+  if (!hadRoom && tracker.roomId) {
+    void restoreLedger().then(render);
+    void restoreCapture();
+  }
   if (packet.event === "player:game:action_taken" || packet.event === "game:player_turn_ended") adviceToken++;
 });

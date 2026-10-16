@@ -2910,7 +2910,8 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
   var SETTINGS_KEY = "pb:settings";
   var LEDGER_PREFIX = "pb:ledger:";
   var LEDGER_MAX_AGE_MS = 16 * 3600 * 1e3;
-  var CAPTURE_LIMIT = 2e4;
+  var CAPTURE_KEY = "pb:capture";
+  var CAPTURE_LIMIT = 3e4;
   var tracker = new Tracker();
   var model = new OpponentModel();
   var capture = [];
@@ -3021,6 +3022,33 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
     if (!tracker.roomId) return;
     storage?.set({ [LEDGER_PREFIX + tracker.roomId]: { savedAt: Date.now(), rows: tracker.exportLedger() } });
   }
+  var captureRestored = false;
+  var captureTimer;
+  function storeCapture() {
+    if (!tracker.roomId || !captureRestored) return;
+    storage?.set({ [CAPTURE_KEY]: { roomId: tracker.roomId, started, savedAt: Date.now(), entries: capture } });
+  }
+  function queueStoreCapture() {
+    if (captureTimer) return;
+    captureTimer = setTimeout(() => {
+      captureTimer = void 0;
+      storeCapture();
+    }, 3e4);
+  }
+  async function restoreCapture() {
+    if (captureRestored || !tracker.roomId || !storage) return;
+    const v = await storage.get(CAPTURE_KEY);
+    const saved = v[CAPTURE_KEY];
+    if (saved?.roomId === tracker.roomId && Date.now() - saved.savedAt < LEDGER_MAX_AGE_MS && Array.isArray(saved.entries)) {
+      const shift = started - saved.started;
+      const now = capture.map((p) => ({ ...p, t: (p.t ?? 0) + shift }));
+      capture = [...saved.entries, { dir: "meta", event: "page-reload", t: shift }, ...now].slice(-CAPTURE_LIMIT);
+      started = saved.started;
+    }
+    captureRestored = true;
+    storeCapture();
+  }
+  window.addEventListener("pagehide", storeCapture);
   async function restoreLedger() {
     if (ledgerRestored || !tracker.roomId || !storage) return;
     ledgerRestored = true;
@@ -3072,10 +3100,15 @@ select { background: #2c313b; color: #e8eaed; border: 1px solid #3a3f4b; border-
   window.addEventListener("message", (e) => {
     if (e.source !== window || e.data?.source !== "pokerbot-page") return;
     const packet = e.data.packet;
-    if (capture.length < CAPTURE_LIMIT) capture.push({ ...packet, t: Date.now() - started });
+    capture.push({ ...packet, t: Date.now() - started });
+    if (capture.length > CAPTURE_LIMIT) capture.splice(0, capture.length - CAPTURE_LIMIT);
+    queueStoreCapture();
     const hadRoom = tracker.roomId;
     tracker.handle(packet);
-    if (!hadRoom && tracker.roomId) void restoreLedger().then(render);
+    if (!hadRoom && tracker.roomId) {
+      void restoreLedger().then(render);
+      void restoreCapture();
+    }
     if (packet.event === "player:game:action_taken" || packet.event === "game:player_turn_ended") adviceToken++;
   });
 })();

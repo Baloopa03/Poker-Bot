@@ -23,7 +23,7 @@ const manifest = {
   name: "Poker Bot (advisor)",
   version: pkg.version,
   description: "Reads your pokerpatio table and suggests plays. Never clicks or acts for you.",
-  permissions: ["storage"],
+  permissions: ["storage", "unlimitedStorage"],
   icons: { 16: "icons/icon16.png", 32: "icons/icon32.png", 48: "icons/icon48.png", 128: "icons/icon128.png" },
   action: { default_title: "Poker Bot: open pokerpatio.com and the panel appears on the table", default_icon: { 16: "icons/icon16.png", 32: "icons/icon32.png" } },
   content_scripts: [
