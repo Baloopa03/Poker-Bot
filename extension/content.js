@@ -1436,6 +1436,11 @@
     const byStrength = ctx.preflop ? Math.min(1.15, Math.max(0.72, 0.55 + 0.9 * eq)) : Math.min(1.12, Math.max(0.8, 0.75 + 0.5 * eq));
     return Math.min(1.15, base * byStrength);
   }
+  var FUTURE_SHARE = 0.6;
+  function futureValue(ctx, eq, behind, pot) {
+    if (!ctx.preflop || behind <= 0) return 0;
+    return FUTURE_SHARE * Math.max(0, eq - 0.5) * Math.min(behind, 2 * pot);
+  }
   function baseContinue(ctx, i) {
     const p = ctx.profiles[i];
     const v = ctx.villains[i];
@@ -1459,8 +1464,10 @@
     const behind = hero.stack - toCall;
     const noMoreBetting = (pot) => allIn || behind <= 0.1 * pot;
     if (!pending.length) {
-      const R = realization(ctx, noMoreBetting(s.pot + toCall) || villains.every((v) => v.allIn), eqAll);
-      return R * eqAll * (s.pot + toCall) - toCall;
+      const done = noMoreBetting(s.pot + toCall) || villains.every((v) => v.allIn);
+      const R = realization(ctx, done, eqAll);
+      const later = done ? 0 : futureValue(ctx, eqAll, Math.min(behind, Math.max(0, ...villains.filter((v) => !v.allIn).map((v) => v.stack))), s.pot + toCall);
+      return R * eqAll * (s.pot + toCall) - toCall + later;
     }
     const heroTo = hero.committedStreet + toCall;
     const resp = pending.map((i) => {
@@ -1485,8 +1492,14 @@
         const k = resp.findIndex((r) => r.i === i);
         return k < 0 ? v.allIn : v.committedStreet + v.stack <= heroTo;
       });
-      const R = realization(ctx, noMoreBetting(s.pot + toCall + extra) || othersAllIn, eq);
-      ev += prob * (R * eq * (s.pot + toCall + extra) - toCall);
+      const done = noMoreBetting(s.pot + toCall + extra) || othersAllIn;
+      const R = realization(ctx, done, eq);
+      const villainBehind = Math.max(
+        0,
+        ...villains.map((v, i) => ranges[i] === null || v.allIn ? 0 : v.stack - Math.max(0, Math.min(heroTo, v.committedStreet + v.stack) - v.committedStreet))
+      );
+      const later = done ? 0 : futureValue(ctx, eq, Math.min(behind, villainBehind), s.pot + toCall + extra);
+      ev += prob * (R * eq * (s.pot + toCall + extra) - toCall + later);
     }
     return ev;
   }
@@ -1509,7 +1522,8 @@
       passive.push(checks);
     });
     const eq = passive.every((r, i) => r === ctx.ranges[i]) ? eqAll : equityVs(ctx, passive, 307);
-    const noRaise = realization(ctx, false, eq) * eq * (s.pot + toCall) - toCall;
+    const behind = Math.min(ctx.hero.stack - toCall, Math.max(0, ...villains.map((v) => v.stack - Math.max(0, s.currentBet - v.committedStreet))));
+    const noRaise = realization(ctx, false, eq) * eq * (s.pot + toCall) - toCall + futureValue(ctx, eq, behind, s.pot + toCall);
     return pNoRaise * noRaise + (1 - pNoRaise) * -toCall;
   }
   function buildOptions(ctx, eqAll) {
@@ -1585,7 +1599,10 @@
   function checkEV(ctx, eqAll) {
     const { s, hero } = ctx;
     if (s.street === "river" && ctx.heroInPosition) return eqAll * s.pot;
-    if (ctx.preflop) return realization(ctx, false, eqAll) * eqAll * s.pot;
+    if (ctx.preflop) {
+      const behind = Math.min(hero.stack, Math.max(0, ...ctx.villains.map((v2) => v2.stack)));
+      return realization(ctx, false, eqAll) * eqAll * s.pot + futureValue(ctx, eqAll, behind, s.pot);
+    }
     const v = ctx.villains[0];
     if (ctx.villains.length === 1 && !ctx.heroInPosition && !v.allIn && v.stack > 0) {
       const lastPreRaiser = [...s.actions].reverse().find((a) => a.street === "preflop" && (a.type === "raise" || a.type === "bet"))?.key;
@@ -1697,7 +1714,8 @@
         const pRaise = contW > 0 ? raiseW / contW : 0;
         const flatRange = new Range(Float64Array.from(resp[i].continuing.w, (w, k) => Math.max(0, w - resp[i].raising.w[k])));
         const eqFlat = flatRange.size() > 1e-6 ? equityVs(ctx, [flatRange], mask * 13 + to) : 0.5;
-        const callEV2 = R(eqFlat) * eqFlat * finalPot - heroAdded;
+        const callerBehind = v.committedStreet + v.stack - heroTo;
+        const callEV2 = R(eqFlat) * eqFlat * finalPot - heroAdded + futureValue(ctx, eqFlat, Math.min(hero.stack - heroAdded, callerBehind), finalPot);
         let raisedEV = -heroAdded;
         if (pRaise > 0.01) {
           const villainMax = v.committedStreet + v.stack;
@@ -1713,7 +1731,8 @@
         eqCalledSum += prob * eqFlat;
       } else {
         const eq = equityVs(ctx, callers.map((i) => resp[i].continuing), mask * 19 + to);
-        scenarioEV = R(eq) * eq * finalPot - heroAdded;
+        const callersBehind = Math.max(0, ...callers.map((i) => villains[i].committedStreet + villains[i].stack - heroTo));
+        scenarioEV = R(eq) * eq * finalPot - heroAdded + (everyoneAllIn ? 0 : futureValue(ctx, eq, Math.min(hero.stack - heroAdded, callersBehind), finalPot));
         eqCalledSum += prob * eq;
       }
       eqCalledW += prob;

@@ -268,6 +268,13 @@ opens ≈45%, big blind defends ≈58% vs a 2.5× open, small blind vs button
 mostly 3-bet-or-fold; heads-up button ≈95% played, big blind defends ≈66%.
 Bet amounts are rounded so the raise-box amount is a multiple of 5.
 
+**Value after the flop:** the one-street model only counts the pot as it
+stands, which made shoving strong hands look better than raising (a shove
+collects everything now; a raise wins more later). Preflop, every non-all-in
+outcome adds `0.6 × max(0, equity − 0.5) × min(chips behind, 2 × pot)`: big
+pairs in raised pots gain a lot, small limped pots barely anything. With it,
+aces and tens raise rather than shove 30+ big blinds deep.
+
 ## 6. Opponent model (the exploit part)
 
 **Stats tracked per person** (People tab links guest names to people): VPIP,

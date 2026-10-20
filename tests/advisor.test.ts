@@ -446,4 +446,17 @@ describe("careful mode and tidy amounts", () => {
     expect(Math.abs(call.ev - jam.ev)).toBeLessThan(60);
     expect(jam.foldProb!).toBe(0);
   });
+
+  it("raises aces normally 35+ big blinds deep instead of shoving them", () => {
+    // Shoving folds out everything aces beat; a normal raise keeps them in and
+    // wins more after the flop.
+    const s = table({
+      hero: "Ac As",
+      players: [player("me", "s2", "SB", 553, 8), player("jules", "s3", "BB", 580, 15), player("sam", "s1", "BTN", 321, 15)],
+      actions: [...blinds().map((a, i) => ({ ...a, key: i ? "jules" : "me", seat: i ? "s3" : "s2" })), { key: "sam", seat: "s1", street: "preflop", type: "call", added: 15, toTotal: 15, facing: 15, potBefore: 23, raisesBefore: 0 }],
+    });
+    const a = advise(s, model, { seed: 8 })!;
+    expect(a.best.action).toBe("raise");
+    expect(a.best.allIn).toBe(false);
+  });
 });
