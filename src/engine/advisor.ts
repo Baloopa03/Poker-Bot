@@ -274,6 +274,11 @@ function baseContinue(ctx: Ctx, i: number): number {
     if (ctx.raises === 1) return Math.min(0.9, Math.max(0.15, 1 - p.stat("foldTo3Bet")));
     return 0.45; // vs 4-bets: continue with a fair share of an already strong range
   }
+  // Someone who has already raised this street holds a strong, committed
+  // range: in these games raisers almost never fold to a re-raise (0 of 4
+  // seen), unlike players who only bet (they fold ~45% when raised).
+  const raisedThisStreet = ctx.s.actions.some((a) => a.key === v.key && a.street === ctx.s.street && a.type === "raise");
+  if (raisedThisStreet) return 0.85;
   const cbet = ctx.s.street === "flop" && ctx.heroWasPreflopAggressor && ctx.raises === 0;
   return 1 - (cbet ? p.stat("foldToCbet") : p.foldToBet(ctx.s.street as "flop" | "turn" | "river"));
 }
@@ -572,7 +577,10 @@ function aggressiveEV(ctx: Ctx, to: number): AggResult {
     const need = callAmt / Math.max(1, s.pot + (capTo - hero.committedStreet) + callAmt);
     const refRatio = ctx.preflop ? ratioAt(stdTo, v) : undefined;
     const committed = v.committedHand / Math.max(1, v.committedHand + v.stack);
-    const r = respondToBet(ctx.ranges[i], s.board, ctx.profiles[i], ratioFor(v), baseContinue(ctx, i), { refRatio, vsBettor: vsHero, need, committed });
+    // A player who has raised this street isn't talked out of it by what our
+    // re-raise represents: judge them by their (sticky) habit alone.
+    const raised = !ctx.preflop && s.actions.some((a) => a.key === v.key && a.street === s.street && a.type === "raise");
+    const r = respondToBet(ctx.ranges[i], s.board, ctx.profiles[i], ratioFor(v), baseContinue(ctx, i), raised ? { committed } : { refRatio, vsBettor: vsHero, need, committed });
     return { ...r, canAct: true };
   });
 

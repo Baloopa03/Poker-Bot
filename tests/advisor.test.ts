@@ -459,4 +459,26 @@ describe("careful mode and tidy amounts", () => {
     expect(a.best.action).toBe("raise");
     expect(a.best.allIn).toBe(false);
   });
+
+  it("doesn't re-shove a medium hand into a river check-raise", () => {
+    // Real hand: we bet 90, they check-raised to 180. Players who raise a
+    // street almost never fold to a re-raise, so shoving J9 is only a bluff.
+    const s = table({
+      hero: "Jc 9d",
+      board: "Ah 2h Js 6s 5c",
+      street: "river",
+      players: [player("me", "s2", "SB", 389, 90), player("ike", "s3", "BB", 752, 180)],
+      currentBet: 180,
+      pot: 360,
+      actions: [
+        ...blinds().map((a, i) => ({ ...a, key: i ? "ike" : "me", seat: i ? "s3" : "s2" })),
+        { key: "me", seat: "s2", street: "river", type: "bet", added: 90, toTotal: 90, facing: 0, potBefore: 90, raisesBefore: 0 },
+        { key: "ike", seat: "s3", street: "river", type: "raise", added: 180, toTotal: 180, facing: 90, potBefore: 180, raisesBefore: 1 },
+      ],
+    });
+    s.lastRaiseSize = 90;
+    const a = advise(s, model, { seed: 9 })!;
+    expect(a.best.allIn).toBe(false);
+    expect(a.options.find((o) => o.allIn)!.foldProb!).toBeLessThan(0.3);
+  });
 });
