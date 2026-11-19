@@ -154,7 +154,8 @@ export function estimateRange(ctx: RangeContext): Range {
     // Postflop: rank combos within the current range on this street's board.
     const board = boardAt(ctx.board, a.street);
     if (board.length < 3) continue;
-    const q = rangePercentiles(range, boardStrengths(board));
+    const bs = boardStrengths(board);
+    const q = rangePercentiles(range, bs);
     const spot = betSpot(ctx.actions, a);
     const betFreq = spot === "cbet" ? profile.stat("cbet") : spot === "lead" ? profile.stat("lead") : profile.stat("betWhenCheckedTo");
     const raiseFreq = profile.stat("raiseVsBet");
@@ -186,7 +187,19 @@ export function estimateRange(ctx: RangeContext): Range {
         const ratio = sizeRatio(a);
         const b = profile.bluffFor(ratio);
         const freq = Math.max(0.05, raiseFreq) * sizeNarrowing(ratio);
-        reweight(range, (i) => Math.max(0.01, inTop(q[i], freq * (1 - b)) + 0.5 * inBottom(q[i], freq * b)));
+        // A raise means an absolutely strong hand for the board, not just the
+        // top of whatever range is left: after a passive player checks a street
+        // their range looks weak, but a check-raise still means they slow-played
+        // something strong (a flush on a flush board, a set, a straight). So
+        // judge the value part by absolute board strength, with the threshold
+        // rising as the player raises less often and for a check-raise (a trap).
+        const checkRaise = ctx.actions.some((x) => x.key === key && x.street === a.street && x.type === "check" && ctx.actions.indexOf(x) < ctx.actions.indexOf(a));
+        const tau = Math.min(0.95, Math.max(0.5, 0.9 - 1.1 * freq + (checkRaise ? 0.06 : 0)));
+        const bluffShare = checkRaise ? b * 0.4 : b;
+        const value = (i: number) => sigmoid((bs[i] - tau) / 0.05);
+        // Low floor: a raise is a narrow action, so junk combos stay near zero
+        // instead of summing to a large "bluff" share across hundreds of them.
+        reweight(range, (i) => Math.max(0.003, value(i) + 0.4 * inBottom(q[i], freq * bluffShare)));
       }
     }
   }

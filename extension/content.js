@@ -1247,7 +1247,8 @@
       }
       const board = boardAt(ctx.board, a.street);
       if (board.length < 3) continue;
-      const q = rangePercentiles(range, boardStrengths(board));
+      const bs = boardStrengths(board);
+      const q = rangePercentiles(range, bs);
       const spot = betSpot(ctx.actions, a);
       const betFreq = spot === "cbet" ? profile.stat("cbet") : spot === "lead" ? profile.stat("lead") : profile.stat("betWhenCheckedTo");
       const raiseFreq = profile.stat("raiseVsBet");
@@ -1269,7 +1270,11 @@
           const ratio2 = sizeRatio(a);
           const b = profile.bluffFor(ratio2);
           const freq = Math.max(0.05, raiseFreq) * sizeNarrowing(ratio2);
-          reweight(range, (i) => Math.max(0.01, inTop(q[i], freq * (1 - b)) + 0.5 * inBottom(q[i], freq * b)));
+          const checkRaise = ctx.actions.some((x) => x.key === key && x.street === a.street && x.type === "check" && ctx.actions.indexOf(x) < ctx.actions.indexOf(a));
+          const tau = Math.min(0.95, Math.max(0.5, 0.9 - 1.1 * freq + (checkRaise ? 0.06 : 0)));
+          const bluffShare = checkRaise ? b * 0.4 : b;
+          const value = (i) => sigmoid((bs[i] - tau) / 0.05);
+          reweight(range, (i) => Math.max(3e-3, value(i) + 0.4 * inBottom(q[i], freq * bluffShare)));
         }
       }
     }

@@ -481,4 +481,28 @@ describe("careful mode and tidy amounts", () => {
     expect(a.best.allIn).toBe(false);
     expect(a.options.find((o) => o.allIn)!.foldProb!).toBeLessThan(0.3);
   });
+
+  it("reads a check-raise all-in on a flush board as strong, not a weak-pair bluff", () => {
+    // Real hand: villain checked three streets on a 3-flush board, then
+    // check-raised all-in over our river bet. That is a slow-played flush or
+    // better, so our two pair is at best a thin call, never a confident one.
+    const s = table({
+      hero: "7h 3h",
+      board: "Tc 8s 4s 7s 3c",
+      street: "river",
+      players: [player("me", "s2", "BTN", 415, 70), player("ike", "s1", "SB", 0, 485)],
+      currentBet: 485,
+      pot: 600,
+      actions: [
+        ...blinds().map((a, i) => ({ ...a, key: i ? "me" : "ike", seat: i ? "s2" : "s1" })),
+        { key: "ike", seat: "s1", street: "river", type: "check", added: 0, toTotal: 0, facing: 0, potBefore: 45, raisesBefore: 0 },
+        { key: "me", seat: "s2", street: "river", type: "bet", added: 70, toTotal: 70, facing: 0, potBefore: 45, raisesBefore: 0 },
+        { key: "ike", seat: "s1", street: "river", type: "raise", added: 485, toTotal: 485, facing: 70, potBefore: 185, raisesBefore: 1, allIn: true },
+      ],
+    });
+    s.players[1].allIn = true;
+    const a = advise(s, model, { seed: 7 })!;
+    // Two pair is now a coin-flip at best against this jam, not a +400 call.
+    expect(a.equity).toBeLessThan(0.35);
+  });
 });
